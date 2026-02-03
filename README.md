@@ -2,147 +2,173 @@
 
 A reactive project estimation system built with Elixir, Phoenix LiveView, and an actor-based "Skills" architecture.
 
-## Vision
+## 3-Second Vision
 
-**"Living Spreadsheets Powered by Communicating Actors"**
+**"Autonomous UI: Interface as an Event Stream"**
 
-Each calculation cell is a "Skill" (actor) that communicates changes through channels, enabling real-time collaboration and full audit trail replay.
+Each UI component is an autonomous Actor (Skill) that communicates through channels. The interface is a living reflection of the message bus, with full time-travel capability.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        LiveView UI Layer                            │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                 │
-│  │ ProjectScope│  │ Activities  │  │  Calculator │                 │
-│  │  Component  │  │  Component  │  │  Component  │                 │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                 │
-└─────────┼────────────────┼────────────────┼─────────────────────────┘
-          │                │                │
-          ▼                ▼                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Skills Registry (GenServer)                       │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  Channel Router - Routes messages between skills              │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-│                                                                      │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐               │
-│  │ Skill A │◄─►│ Skill B │◄─►│ Skill C │◄─►│ Skill D │               │
-│  │ (Actor) │  │ (Actor) │  │ (Actor) │  │ (Actor) │               │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘               │
-└─────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Event Store (Event Sourcing)                      │
-│  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  Timeline: [Event1] → [Event2] → [Event3] → [Event4]         │  │
-│  │            ◄─── Replay Backward    Forward Replay ───►       │  │
-│  └──────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LIVEVIEW PARENT                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    SKILL MANAGER (Orchestrator)                      │   │
+│  │  wiring: %{                                                          │   │
+│  │    "project_scope:output" => ["component_calc:input"],               │   │
+│  │    "component_calc:output" => ["effort:input"]                       │   │
+│  │  }                                                                   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│         ┌──────────────────────────┼──────────────────────────┐             │
+│         ▼                          ▼                          ▼             │
+│  ┌─────────────┐           ┌─────────────┐           ┌─────────────┐       │
+│  │ SKILL:      │           │ SKILL:      │           │ SKILL:      │       │
+│  │ project     │──output──▶│ component   │──output──▶│ effort      │       │
+│  │ _scope      │           │ _calculator │           │ _aggregator │       │
+│  │             │           │             │           │             │       │
+│  │ Pure Fn:    │           │ Pure Fn:    │           │ Pure Fn:    │       │
+│  │ count files │           │ files × 15  │           │ sum days    │       │
+│  └─────────────┘           └─────────────┘           └─────────────┘       │
+│         │                          │                          │             │
+│         └──────────────────────────┼──────────────────────────┘             │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    HISTORY TRACKER (The Tape)                        │   │
+│  │  events: [                                                           │   │
+│  │    {t1, :project_scope, :total_files, 55000},                       │   │
+│  │    {t2, :component_calc, :scaled_effort, 825000},                   │   │
+│  │    {t3, :effort_aggregator, :total_days, 82.5}                      │   │
+│  │  ]                                                                   │   │
+│  │  position: 3 | mode: :live                                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │              NOTIFICATION UI (Time-Travel Controls)                  │   │
+│  │  [⏮️ Start] [⏪ Back] [▶️ Play] [⏩ Forward] [⏭️ End]                │   │
+│  │  ════════════════════●═══════════════════════════                   │   │
+│  │  Event 3/10: component_calc changed 825000 → 840000                 │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Concepts
 
 ### Skills as Actors
-- Each Skill is an Elixir GenServer (actor)
-- Skills are pure functions with input/output channel names
+- Each Skill is an Elixir GenServer (actor process)
+- Skills wrap **pure functions**: `compute(state, input) -> {new_state, outputs}`
 - Skills communicate through Phoenix PubSub channels
-- Changes trigger notifications and can cascade through the skill graph
+- Changes cascade through the skill dependency graph
 
-### Event Sourcing
+### The Tape (History Tracker)
 - All skill state changes are recorded as events
-- Events can be replayed forward or backward
+- Events can be replayed forward or backward (time-travel)
 - Full audit trail of all changes
-- Time-travel debugging capability
+- Enables debugging by stepping through history
 
 ### Real-time Updates
 - Phoenix LiveView provides real-time UI updates
-- No JavaScript required for reactivity
 - Changes propagate instantly across all connected clients
+- No page refresh required
 
 ## Features
 
-- **Project Scope** - Track files, components, and complexity
-- **Activities Table** - Manage tasks with team assignments
-- **Component Scaling Calculator** - Calculate effort based on component counts
-- **Effort Breakdown** - View manual vs automation days
-- **Buffer Calculator** - Plan for leaves, dependencies, and learning curves
-- **Team Composition** - Resource planning
+| Feature | Description |
+|---------|-------------|
+| **Project Scope** | Track files (simple/medium/complex) and component breakdown |
+| **Activities Table** | Manage tasks with team assignments (SB, CG, S2P) |
+| **Component Calculator** | Calculate effort based on component counts and automation % |
+| **Effort Breakdown** | View manual vs automation days |
+| **Buffer Calculator** | Plan for leaves, dependencies, and learning curves |
+| **Team Composition** | Resource planning and allocation |
+| **Timeline** | Time-travel through skill communications |
 
 ## Skills Included
 
-| Skill | Description | Input Channels | Output Channels |
-|-------|-------------|----------------|-----------------|
-| `ProjectScopeSkill` | Calculates project metrics | file counts | total files, components |
-| `ComponentScalerSkill` | Scales effort calculations | component counts | base days, final days |
-| `ActivityCalculatorSkill` | Calculates activity effort | activity updates | activities summary |
-| `EffortAggregatorSkill` | Aggregates total effort | day totals | effort breakdown |
-| `BufferCalculatorSkill` | Calculates project buffers | final days | buffer days |
+| Skill | Pure Function | Input Channels | Output Channels |
+|-------|---------------|----------------|-----------------|
+| `ProjectScopeSkill` | Count files → components | `:file_counts` | `:total_files`, `:component_breakdown` |
+| `ComponentCalculatorSkill` | Components × time → days | `:breakdown` | `:scaled_effort` |
+| `ActivityCalculatorSkill` | Activities → totals | `:activity_update`, `:team_assignment` | `:activity_totals` |
+| `EffortAggregatorSkill` | Sum all effort sources | `:component_effort`, `:activity_effort` | `:total_days` |
+| `BufferCalculatorSkill` | Base days × buffer % | `:base_days` | `:buffer_days` |
 
 ## Getting Started
 
 ### Prerequisites
-- Elixir 1.14+
-- Phoenix 1.7+
-- Node.js 18+ (for assets)
+
+- **Elixir** 1.14+ with Erlang/OTP 25+
+- **Node.js** 18+ (for assets)
+- **Python** 3.8+ (for tests)
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/neoExcelPPT.git
+git clone https://github.com/mutyalaRaviT/neoExcelPPT.git
 cd neoExcelPPT
 
-# Install dependencies
+# Install Elixir dependencies
 mix deps.get
 
-# Install Node.js dependencies for assets
+# Install Node.js dependencies
 cd assets && npm install && cd ..
 
 # Start the Phoenix server
 mix phx.server
 ```
 
-Visit [`localhost:4000`](http://localhost:4000) to see the application.
+Visit [localhost:4000](http://localhost:4000) to see the application.
 
-### Running in Development
+### Pages
 
-```bash
-# Start with interactive shell
-iex -S mix phx.server
-
-# Run tests
-mix test
-
-# Format code
-mix format
-```
+| Route | Description |
+|-------|-------------|
+| `/` | Main project estimation dashboard |
+| `/timeline` | Event history with time-travel controls |
+| `/skills` | Skills registry and communication graph |
 
 ## Project Structure
 
 ```
 lib/
 ├── neo_excel_ppt/
-│   ├── application.ex          # Application supervisor
+│   ├── application.ex              # Application supervisor
 │   └── skills/
-│       ├── skill.ex            # Skill behaviour
-│       ├── registry.ex         # Skills supervisor
-│       ├── channel.ex          # PubSub wrapper
-│       ├── event_store.ex      # Event sourcing
-│       └── *_skill.ex          # Skill implementations
+│       ├── skill.ex                # Skill behaviour (pure function wrapper)
+│       ├── skill_manager.ex        # Communication orchestrator
+│       ├── history_tracker.ex      # The Tape (event sourcing)
+│       ├── channel.ex              # PubSub wrapper
+│       ├── registry.ex             # Process registry
+│       ├── project_scope_skill.ex
+│       ├── component_calculator_skill.ex
+│       ├── activity_calculator_skill.ex
+│       ├── effort_aggregator_skill.ex
+│       └── buffer_calculator_skill.ex
 │
 ├── neo_excel_ppt_web/
-│   ├── router.ex               # Routes
-│   ├── endpoint.ex             # HTTP endpoint
+│   ├── router.ex
+│   ├── endpoint.ex
+│   ├── components/
+│   │   ├── core_components.ex      # Reusable UI components
+│   │   └── layouts/
 │   └── live/
-│       ├── project_live.ex     # Main dashboard
-│       ├── skills_live.ex      # Skills management
-│       └── timeline_live.ex    # Event replay
+│       ├── project_live.ex         # Main dashboard
+│       ├── timeline_live.ex        # Time-travel UI
+│       └── skills_live.ex          # Skills management
 │
-└── assets/
-    ├── css/app.css             # TailwindCSS styles
-    └── js/app.js               # Phoenix LiveView JS
+├── assets/
+│   ├── css/app.css                 # TailwindCSS styles
+│   └── js/app.js                   # LiveView hooks
+│
+└── test/
+    └── python/                     # Playwright tests
+        ├── conftest.py             # Test configuration & IDs
+        ├── test_unit.py            # Unit tests (no browser)
+        ├── test_simple.py          # Basic UI tests
+        └── test_medium.py          # Interaction tests
 ```
 
 ## Creating a Custom Skill
@@ -152,7 +178,7 @@ defmodule NeoExcelPPT.Skills.MyCustomSkill do
   use NeoExcelPPT.Skills.Skill
 
   @impl true
-  def name, do: :my_custom_skill
+  def skill_id, do: :my_custom_skill
 
   @impl true
   def input_channels, do: [:input_a, :input_b]
@@ -161,8 +187,15 @@ defmodule NeoExcelPPT.Skills.MyCustomSkill do
   def output_channels, do: [:result]
 
   @impl true
-  def compute(%{input_a: a, input_b: b}) do
-    %{result: a + b}
+  def initial_state, do: %{value: 0}
+
+  @impl true
+  def compute(state, input) do
+    # Pure function: (state, input) -> {new_state, outputs}
+    new_value = state.value + input.data
+    new_state = %{state | value: new_value}
+    outputs = %{result: new_value}
+    {new_state, outputs}
   end
 end
 ```
@@ -172,25 +205,129 @@ end
 ### Channel Communication
 
 ```elixir
+alias NeoExcelPPT.Skills.Channel
+
 # Subscribe to a channel
 Channel.subscribe(:total_files)
 
-# Publish to a channel
-Channel.publish(:total_files, 55000)
+# Broadcast to a channel
+Channel.broadcast(:total_files, %{from: :my_skill, data: 55000})
 ```
 
-### Event Store
+### History Tracker (Time-Travel)
 
 ```elixir
+alias NeoExcelPPT.Skills.HistoryTracker
+
 # Get all events
-EventStore.get_events()
+HistoryTracker.get_events()
+
+# Get current position
+HistoryTracker.get_position()
+# => %{position: 5, total: 10, mode: :live}
 
 # Step through history
-EventStore.step_forward()
-EventStore.step_backward()
+HistoryTracker.step_forward()
+HistoryTracker.step_backward()
 
-# Replay to a specific point
-EventStore.replay_to_index(5)
+# Jump to specific position
+HistoryTracker.goto_index(3)
+
+# Go to start/end
+HistoryTracker.goto_start()
+HistoryTracker.goto_end()  # Returns to :live mode
+```
+
+### Skill Manager
+
+```elixir
+alias NeoExcelPPT.Skills.SkillManager
+
+# Get all skills
+SkillManager.get_skills()
+
+# Get dependency graph
+SkillManager.get_dependency_graph()
+
+# Send input to a skill
+SkillManager.send_input(:project_scope, :file_counts, %{simple: 60000})
+```
+
+## Testing
+
+### Python Playwright Tests
+
+The project includes comprehensive Python tests using Playwright.
+
+```bash
+# Install test dependencies
+pip install playwright pytest pytest-playwright
+playwright install chromium
+
+# Run unit tests (no browser required)
+cd test/python
+python -m pytest test_unit.py -v
+
+# Run all tests (requires Phoenix server running)
+mix phx.server  # In another terminal
+python -m pytest -v
+```
+
+### Test Results
+
+```
+test_unit.py - 19 tests (Configuration, Element IDs, Naming Conventions)
+test_simple.py - 26 tests (Page loads, Elements exist, Navigation)
+test_medium.py - 20+ tests (Interactions, Data propagation, LiveView)
+```
+
+### HTML Element IDs for Testing
+
+All testable elements have consistent IDs defined in `test/python/conftest.py`:
+
+#### Navigation
+- `main-nav`, `nav-project`, `nav-timeline`, `nav-skills`
+
+#### Project Scope
+- `project-scope`, `project-scope-total-files`, `project-scope-project-type`
+- `project-scope-simple-count`, `project-scope-medium-count`, `project-scope-complex-count`
+- `component-simple`, `component-medium`, `component-complex`
+
+#### Activities Table
+- `activities-table`, `activities-totals`
+- `activity-row-{id}` (e.g., `activity-row-preprocessing`)
+- `activity-{id}-assignment-{member}` (e.g., `activity-preprocessing-assignment-SB`)
+- `activity-{id}-days`, `activity-{id}-auto-pct`, `activity-{id}-total-base`
+
+#### Component Calculator
+- `component-calculator`, `component-calc-totals`
+- `component-{type}-count`, `component-{type}-final-days`
+
+#### Project Details
+- `effort-breakdown`, `effort-manual-days`, `effort-automation-days`
+- `proposed-buffers`, `buffer-leave`, `buffer-dependency`, `buffer-learning`
+- `team-composition`, `team-automation-count`, `team-testing-count`
+
+#### Timeline
+- `timeline-container`, `timeline-controls`
+- `timeline-btn-start`, `timeline-btn-back`, `timeline-btn-play`, `timeline-btn-forward`, `timeline-btn-end`
+- `timeline-scrubber`, `timeline-position`, `timeline-mode`
+- `timeline-event-{index}`
+
+## Development
+
+```bash
+# Start with interactive shell
+iex -S mix phx.server
+
+# Run Elixir tests
+mix test
+
+# Format code
+mix format
+
+# Check for issues
+mix credo
 ```
 
 ## Contributing
@@ -204,3 +341,7 @@ EventStore.replay_to_index(5)
 ## License
 
 MIT License - see LICENSE file for details
+
+---
+
+**Motto:** *"Skills Talk, Data Walks"*
