@@ -11,7 +11,6 @@ config :neo_excel_ppt, NeoExcelPPTWeb.Endpoint,
     tailwind: {Tailwind, :install_and_run, [:default, ~w(--watch)]}
   ]
 
-# Live reload configuration
 config :neo_excel_ppt, NeoExcelPPTWeb.Endpoint,
   live_reload: [
     patterns: [
@@ -20,14 +19,10 @@ config :neo_excel_ppt, NeoExcelPPTWeb.Endpoint,
     ]
   ]
 
-# Enable dev routes for dashboard
 config :neo_excel_ppt, dev_routes: true
 
-# Logger level
 config :logger, :console, format: "[$level] $message\n"
 
-# Initialize plugs at runtime for faster development compilation
-config :phoenix, :plug_init_mode, :runtime
+config :phoenix, :stacktrace_depth, 20
 
-# Disable swoosh api client as it is only required for production adapters
-config :swoosh, :api_client, false
+config :phoenix, :plug_init_mode, :runtime

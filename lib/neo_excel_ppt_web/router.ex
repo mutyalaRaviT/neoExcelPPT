@@ -17,15 +17,19 @@ defmodule NeoExcelPPTWeb.Router do
   scope "/", NeoExcelPPTWeb do
     pipe_through :browser
 
-    # Main project estimation page
     live "/", ProjectLive, :index
-
-    # Skills management
-    live "/skills", SkillsLive, :index
-    live "/skills/:id", SkillsLive, :show
-
-    # Event timeline
     live "/timeline", TimelineLive, :index
+    live "/skills", SkillsLive, :index
+  end
+
+  # API routes for testing
+  scope "/api", NeoExcelPPTWeb do
+    pipe_through :api
+
+    get "/health", HealthController, :index
+    get "/skills", SkillsController, :index
+    get "/skills/:id", SkillsController, :show
+    get "/events", EventsController, :index
   end
 
   # Enable LiveDashboard in development

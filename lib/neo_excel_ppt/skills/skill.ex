@@ -1,66 +1,64 @@
 defmodule NeoExcelPPT.Skills.Skill do
   @moduledoc """
-  Behaviour definition for Skills.
+  Skill Behavior - The Actor Blueprint.
 
-  A Skill is an actor (GenServer) that:
-  - Has a unique name
+  A Skill is a pure function wrapper that:
   - Subscribes to input channels
-  - Publishes to output channels
-  - Contains a pure function for computation
-  - Records all state changes to EventStore
+  - Processes inputs through a pure function
+  - Emits outputs to output channels
+  - Records all state changes to the History Tracker
 
-  Skills are the fundamental building blocks that communicate
-  through channels, enabling reactive, composable computations.
-
-  ## Example
+  ## Usage
 
       defmodule MySkill do
         use NeoExcelPPT.Skills.Skill
 
         @impl true
-        def name, do: :my_skill
+        def skill_id, do: :my_skill
 
         @impl true
-        def input_channels, do: [:value_a, :value_b]
+        def input_channels, do: [:input_a, :input_b]
 
         @impl true
         def output_channels, do: [:result]
 
         @impl true
-        def compute(%{value_a: a, value_b: b}) do
-          %{result: a + b}
+        def initial_state, do: %{value: 0}
+
+        @impl true
+        def compute(state, input) do
+          new_value = state.value + input.data
+          {%{state | value: new_value}, %{result: new_value}}
         end
       end
   """
 
-  @doc "Unique name for this skill"
-  @callback name() :: atom()
+  @doc "Unique identifier for this skill"
+  @callback skill_id() :: atom()
 
-  @doc "List of channel names this skill subscribes to"
+  @doc "List of channels this skill listens to"
   @callback input_channels() :: [atom()]
 
-  @doc "List of channel names this skill publishes to"
+  @doc "List of channels this skill publishes to"
   @callback output_channels() :: [atom()]
 
-  @doc "Pure function that computes outputs from inputs"
-  @callback compute(inputs :: map()) :: outputs :: map()
-
-  @doc "Optional: Initialize default state"
+  @doc "Initial state for the skill"
   @callback initial_state() :: map()
 
-  @optional_callbacks [initial_state: 0]
+  @doc "Pure function: (state, input) -> {new_state, outputs}"
+  @callback compute(state :: map(), input :: map()) :: {map(), map()}
+
+  @doc "Optional: Render function for LiveComponent"
+  @callback render(assigns :: map()) :: Phoenix.LiveView.Rendered.t()
+
+  @optional_callbacks [render: 1]
 
   defmacro __using__(_opts) do
     quote do
-      use GenServer
       @behaviour NeoExcelPPT.Skills.Skill
+      use GenServer
 
-      alias NeoExcelPPT.Skills.{Channel, EventStore}
-
-      # Default implementation
-      def initial_state, do: %{}
-
-      defoverridable initial_state: 0
+      alias NeoExcelPPT.Skills.{Channel, HistoryTracker}
 
       # Client API
 
@@ -72,16 +70,16 @@ defmodule NeoExcelPPT.Skills.Skill do
         GenServer.call(via_tuple(), :get_state)
       end
 
-      def get_outputs do
-        GenServer.call(via_tuple(), :get_outputs)
+      def force_state(state) do
+        GenServer.cast(via_tuple(), {:force_state, state})
       end
 
-      def update_input(channel, value) do
-        GenServer.cast(via_tuple(), {:update_input, channel, value})
+      def process_input(input) do
+        GenServer.cast(via_tuple(), {:process_input, input})
       end
 
       defp via_tuple do
-        {:via, Registry, {NeoExcelPPT.Skills.ProcessRegistry, name()}}
+        {:via, Registry, {NeoExcelPPT.Skills.Registry, skill_id()}}
       end
 
       # Server Callbacks
@@ -92,9 +90,10 @@ defmodule NeoExcelPPT.Skills.Skill do
         Enum.each(input_channels(), &Channel.subscribe/1)
 
         state = %{
-          inputs: initial_state(),
-          outputs: %{},
-          last_computed_at: nil
+          skill_id: skill_id(),
+          data: initial_state(),
+          input_channels: input_channels(),
+          output_channels: output_channels()
         }
 
         {:ok, state}
@@ -102,48 +101,61 @@ defmodule NeoExcelPPT.Skills.Skill do
 
       @impl GenServer
       def handle_call(:get_state, _from, state) do
-        {:reply, state, state}
+        {:reply, state.data, state}
       end
 
       @impl GenServer
-      def handle_call(:get_outputs, _from, state) do
-        {:reply, state.outputs, state}
+      def handle_cast({:force_state, new_data}, state) do
+        # Used for time-travel - directly set state without side effects
+        {:noreply, %{state | data: new_data}}
       end
 
       @impl GenServer
-      def handle_cast({:update_input, channel, value}, state) do
-        new_inputs = Map.put(state.inputs, channel, value)
-        new_outputs = compute(new_inputs)
-        now = DateTime.utc_now()
+      def handle_cast({:process_input, input}, state) do
+        handle_input_message(input, state)
+      end
 
-        # Record event for each changed output
-        Enum.each(new_outputs, fn {out_channel, out_value} ->
-          old_value = Map.get(state.outputs, out_channel)
+      @impl GenServer
+      def handle_info({:channel_message, channel, message}, state) do
+        if channel in state.input_channels do
+          handle_input_message(%{channel: channel, data: message}, state)
+        else
+          {:noreply, state}
+        end
+      end
 
-          if old_value != out_value do
-            EventStore.record_event(%{
-              skill: name(),
-              channel: out_channel,
-              old_value: old_value,
-              new_value: out_value,
-              triggered_by: channel,
-              timestamp: now
-            })
+      defp handle_input_message(input, state) do
+        old_data = state.data
 
-            # Publish to output channel
-            Channel.publish(out_channel, out_value)
-          end
+        # Call the pure compute function
+        {new_data, outputs} = compute(old_data, input)
+
+        # Record to history tracker
+        Enum.each(outputs, fn {channel, value} ->
+          old_value = Map.get(old_data, channel)
+          HistoryTracker.record_event(%{
+            skill_id: state.skill_id,
+            channel: channel,
+            old_value: old_value,
+            new_value: value,
+            input: input,
+            timestamp: DateTime.utc_now()
+          })
+
+          # Broadcast to output channels
+          Channel.broadcast(channel, %{
+            from: state.skill_id,
+            data: value
+          })
         end)
 
-        new_state = %{state | inputs: new_inputs, outputs: new_outputs, last_computed_at: now}
-        {:noreply, new_state}
+        {:noreply, %{state | data: new_data}}
       end
 
-      @impl GenServer
-      def handle_info({:channel_update, channel, value}, state) do
-        # Received update from a subscribed channel
-        handle_cast({:update_input, channel, value}, state)
-      end
+      # Default implementations
+      def initial_state, do: %{}
+
+      defoverridable [initial_state: 0]
     end
   end
 end

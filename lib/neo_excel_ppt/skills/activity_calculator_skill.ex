@@ -1,289 +1,236 @@
 defmodule NeoExcelPPT.Skills.ActivityCalculatorSkill do
   @moduledoc """
-  Skill for calculating activity/task effort.
+  Activity Calculator Skill - Manages activities and team assignments.
 
-  Manages the activities table with:
-  - Team assignments (SB, CG, S2P)
-  - Days per unit
-  - Automation percentages
-  - Base and final day calculations
+  Pure Function: (activity_updates, team_assignments) -> activity_totals
 
-  Categories:
-  - PREPROCESSING (DDLs Ready, Data Ready, Mapping Flow ID)
-  - CODE CONVERSION (Mapping Creation, Code Execution, Compile Validation)
-  - EXECUTION WITH DATA (Data Verification, Execute, Validation & Logs, Debug Data Issues, Debug Code Issues)
-  - POST PROCESSING (Dev to SIT Movement, Integration Testing, Deployment & Maintenance)
+  Input Channels:
+  - :activity_update - Update to a specific activity
+  - :team_assignment - Toggle team member assignment
+
+  Output Channels:
+  - :activity_totals - Summary of all activities
   """
 
   use NeoExcelPPT.Skills.Skill
 
   @impl true
-  def name, do: :activity_calculator
+  def skill_id, do: :activity_calculator
 
   @impl true
-  def input_channels do
-    [
-      :activity_updates,
-      :team_assignment_updates,
-      :total_components
-    ]
-  end
+  def input_channels, do: [:activity_update, :team_assignment]
 
   @impl true
-  def output_channels do
-    [
-      :activities_summary,
-      :total_base_days,
-      :total_final_days,
-      :activities_by_category
-    ]
-  end
+  def output_channels, do: [:activity_totals]
 
   @impl true
   def initial_state do
     %{
       activities: default_activities(),
-      total_components: 874_500
+      team_members: ["SB", "CG", "S2P"],
+      totals: %{
+        base_days: 82.5,
+        final_days: 19.8,
+        avg_auto_pct: 76
+      }
     }
   end
 
   @impl true
-  def compute(inputs) do
-    activities = Map.get(inputs, :activities, default_activities())
+  def compute(state, input) do
+    case input.channel do
+      :activity_update ->
+        %{id: activity_id, field: field, value: value} = input.data
 
-    # Group by category and calculate totals
-    by_category = Enum.group_by(activities, & &1.category)
+        activities = update_activity(state.activities, activity_id, field, value)
+        totals = calculate_totals(activities)
 
-    category_summaries = Enum.map(by_category, fn {cat, acts} ->
-      cat_base = Enum.reduce(acts, 0, fn a, acc -> acc + a.base_days end)
-      cat_final = Enum.reduce(acts, 0, fn a, acc -> acc + calculate_final_days(a) end)
-      cat_auto = if cat_base > 0, do: Float.round((cat_base - cat_final) / cat_base * 100, 0), else: 0
+        new_state = %{state | activities: activities, totals: totals}
 
-      %{
-        category: cat,
-        activities: acts,
-        total_base: cat_base,
-        total_final: cat_final,
-        auto_pct: cat_auto
-      }
-    end)
-
-    total_base = Enum.reduce(activities, 0, fn a, acc -> acc + a.base_days end)
-    total_final = Enum.reduce(activities, 0, fn a, acc -> acc + calculate_final_days(a) end)
-    avg_auto = if total_base > 0, do: Float.round((total_base - total_final) / total_base * 100, 0), else: 0
-
-    %{
-      activities_summary: %{
-        categories: category_summaries,
-        totals: %{
-          base_days: total_base,
-          final_days: total_final,
-          auto_pct: avg_auto
+        outputs = %{
+          activity_totals: %{
+            activities: activities,
+            totals: totals
+          }
         }
-      },
-      total_base_days: total_base,
-      total_final_days: total_final,
-      activities_by_category: by_category
-    }
-  end
 
-  defp calculate_final_days(activity) do
-    activity.base_days * (1 - activity.auto_pct / 100)
+        {new_state, outputs}
+
+      :team_assignment ->
+        %{activity_id: activity_id, member: member, assigned: assigned} = input.data
+
+        activities = update_assignment(state.activities, activity_id, member, assigned)
+        new_state = %{state | activities: activities}
+
+        outputs = %{
+          activity_totals: %{
+            activities: activities,
+            totals: state.totals
+          }
+        }
+
+        {new_state, outputs}
+
+      _ ->
+        {state, %{}}
+    end
   end
 
   defp default_activities do
-    [
-      # PREPROCESSING
-      %{
-        id: "prep",
+    %{
+      preprocessing: %{
+        id: :preprocessing,
         name: "PREPROCESSING",
-        category: :preprocessing,
-        is_category: true,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.1,
+        icon: "📁",
+        color: "yellow",
+        days_per_unit: 0.1,
         auto_pct: 90,
         base_days: 15,
-        children: ["ddls_ready", "data_ready", "mapping_flow_id"]
+        final_days: 1.5,
+        assignments: %{"SB" => false, "CG" => false, "S2P" => true},
+        children: [
+          %{id: :ddls_ready, name: "DDLs Ready", days_per_unit: 0.3, auto_pct: 95, base_days: 3, final_days: 0.2, assignments: %{"SB" => false, "CG" => false, "S2P" => true}},
+          %{id: :data_ready, name: "Data Ready", days_per_unit: 0.6, auto_pct: 80, base_days: 6, final_days: 1.2, assignments: %{"SB" => true, "CG" => false, "S2P" => false}},
+          %{id: :mapping_flow_id, name: "Mapping Flow ID", days_per_unit: 0.1, auto_pct: 85, base_days: 6, final_days: 0.9, assignments: %{"SB" => false, "CG" => true, "S2P" => false}}
+        ]
       },
-      %{
-        id: "ddls_ready",
-        name: "DDLs Ready",
-        category: :preprocessing,
-        is_category: false,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.3,
-        auto_pct: 95,
-        base_days: 3
-      },
-      %{
-        id: "data_ready",
-        name: "Data Ready",
-        category: :preprocessing,
-        is_category: false,
-        team: %{sb: true, cg: false, s2p: false},
-        days_unit: 0.6,
-        auto_pct: 80,
-        base_days: 6
-      },
-      %{
-        id: "mapping_flow_id",
-        name: "Mapping Flow ID",
-        category: :preprocessing,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 85,
-        base_days: 6
-      },
-
-      # CODE CONVERSION
-      %{
-        id: "code_conv",
+      code_conversion: %{
+        id: :code_conversion,
         name: "CODE CONVERSION",
-        category: :code_conversion,
-        is_category: true,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.1,
+        icon: "💻",
+        color: "blue",
+        days_per_unit: 0.1,
         auto_pct: 85,
         base_days: 30,
-        children: ["mapping_creation", "code_execution", "compile_validation"]
+        final_days: 4.5,
+        assignments: %{"SB" => false, "CG" => false, "S2P" => true},
+        children: [
+          %{id: :mapping_creation, name: "Mapping Creation", days_per_unit: 0.1, auto_pct: 90, base_days: 15, final_days: 1.5, assignments: %{"SB" => false, "CG" => false, "S2P" => true}},
+          %{id: :code_execution, name: "Code Execution", days_per_unit: 0.1, auto_pct: 70, base_days: 15, final_days: 4.5, assignments: %{"SB" => false, "CG" => false, "S2P" => true}},
+          %{id: :compile_validation, name: "Compile Validation", days_per_unit: 0.1, auto_pct: 60, base_days: 6, final_days: 2.4, assignments: %{"SB" => false, "CG" => true, "S2P" => false}}
+        ]
       },
-      %{
-        id: "mapping_creation",
-        name: "Mapping Creation",
-        category: :code_conversion,
-        is_category: false,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.1,
-        auto_pct: 90,
-        base_days: 15
-      },
-      %{
-        id: "code_execution",
-        name: "Code Execution",
-        category: :code_conversion,
-        is_category: false,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.1,
-        auto_pct: 70,
-        base_days: 15
-      },
-      %{
-        id: "compile_validation",
-        name: "Compile Validation",
-        category: :code_conversion,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 60,
-        base_days: 6
-      },
-
-      # EXECUTION WITH DATA
-      %{
-        id: "exec_data",
+      execution_with_data: %{
+        id: :execution_with_data,
         name: "EXECUTION WITH DATA",
-        category: :execution_with_data,
-        is_category: true,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
+        icon: "⚡",
+        color: "purple",
+        days_per_unit: 0.1,
         auto_pct: 65,
         base_days: 22.5,
-        children: ["data_verification", "execute", "validation_logs", "debug_data", "debug_code"]
+        final_days: 7.9,
+        assignments: %{"SB" => false, "CG" => true, "S2P" => false},
+        children: [
+          %{id: :data_verification, name: "Data Verification", days_per_unit: 0.1, auto_pct: 70, base_days: 7.5, final_days: 2.3, assignments: %{"SB" => false, "CG" => true, "S2P" => false}},
+          %{id: :execute, name: "Execute", days_per_unit: 0.1, auto_pct: 95, base_days: 3.8, final_days: 0.2, assignments: %{"SB" => true, "CG" => false, "S2P" => false}},
+          %{id: :validation_logs, name: "Validation & Logs", days_per_unit: 0.1, auto_pct: 50, base_days: 7.5, final_days: 3.8, assignments: %{"SB" => false, "CG" => true, "S2P" => false}},
+          %{id: :debug_data_issues, name: "Debug Data Issues", days_per_unit: 0.1, auto_pct: 40, base_days: 3.8, final_days: 2.3, assignments: %{"SB" => false, "CG" => true, "S2P" => false}},
+          %{id: :debug_code_issues, name: "Debug Code Issues", days_per_unit: 0.1, auto_pct: 30, base_days: 3, final_days: 2.1, assignments: %{"SB" => false, "CG" => true, "S2P" => false}}
+        ]
       },
-      %{
-        id: "data_verification",
-        name: "Data Verification",
-        category: :execution_with_data,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 70,
-        base_days: 7.5
-      },
-      %{
-        id: "execute",
-        name: "Execute",
-        category: :execution_with_data,
-        is_category: false,
-        team: %{sb: true, cg: false, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 95,
-        base_days: 3.8
-      },
-      %{
-        id: "validation_logs",
-        name: "Validation & Logs",
-        category: :execution_with_data,
-        is_category: false,
-        team: %{sb: false, cg: false, s2p: true},
-        days_unit: 0.1,
-        auto_pct: 50,
-        base_days: 7.5
-      },
-      %{
-        id: "debug_data",
-        name: "Debug Data Issues",
-        category: :execution_with_data,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 40,
-        base_days: 3.8
-      },
-      %{
-        id: "debug_code",
-        name: "Debug Code Issues",
-        category: :execution_with_data,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 30,
-        base_days: 3
-      },
-
-      # POST PROCESSING
-      %{
-        id: "post_proc",
+      post_processing: %{
+        id: :post_processing,
         name: "POST PROCESSING",
-        category: :post_processing,
-        is_category: true,
-        team: %{sb: true, cg: true, s2p: false},
-        days_unit: 0.1,
+        icon: "🚀",
+        color: "green",
+        days_per_unit: 0.1,
         auto_pct: 75,
         base_days: 15,
-        children: ["dev_sit", "integration_test", "deployment"]
-      },
-      %{
-        id: "dev_sit",
-        name: "Dev to SIT Movement",
-        category: :post_processing,
-        is_category: false,
-        team: %{sb: true, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 80,
-        base_days: 6
-      },
-      %{
-        id: "integration_test",
-        name: "Integration Testing",
-        category: :post_processing,
-        is_category: false,
-        team: %{sb: false, cg: true, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 70,
-        base_days: 6
-      },
-      %{
-        id: "deployment",
-        name: "Deployment & Maintenance",
-        category: :post_processing,
-        is_category: false,
-        team: %{sb: true, cg: false, s2p: false},
-        days_unit: 0.1,
-        auto_pct: 60,
-        base_days: 3
+        final_days: 3.8,
+        assignments: %{"SB" => true, "CG" => true, "S2P" => false},
+        children: [
+          %{id: :dev_to_sit, name: "Dev to SIT Movement", days_per_unit: 0.1, auto_pct: 80, base_days: 6, final_days: 1.2, assignments: %{"SB" => true, "CG" => true, "S2P" => false}},
+          %{id: :integration_testing, name: "Integration Testing", days_per_unit: 0.1, auto_pct: 70, base_days: 6, final_days: 1.8, assignments: %{"SB" => false, "CG" => true, "S2P" => false}},
+          %{id: :deployment_maintenance, name: "Deployment & Maintenance", days_per_unit: 0.1, auto_pct: 60, base_days: 3, final_days: 1.2, assignments: %{"SB" => true, "CG" => false, "S2P" => false}}
+        ]
       }
-    ]
+    }
+  end
+
+  defp update_activity(activities, activity_id, field, value) do
+    # Find and update the activity (could be parent or child)
+    Enum.reduce(activities, %{}, fn {key, activity}, acc ->
+      updated = cond do
+        activity.id == activity_id ->
+          Map.put(activity, field, value)
+          |> recalculate_activity()
+
+        Enum.any?(activity.children, & &1.id == activity_id) ->
+          children = Enum.map(activity.children, fn child ->
+            if child.id == activity_id do
+              Map.put(child, field, value)
+              |> recalculate_child()
+            else
+              child
+            end
+          end)
+          recalculate_parent(%{activity | children: children})
+
+        true ->
+          activity
+      end
+      Map.put(acc, key, updated)
+    end)
+  end
+
+  defp update_assignment(activities, activity_id, member, assigned) do
+    Enum.reduce(activities, %{}, fn {key, activity}, acc ->
+      updated = cond do
+        activity.id == activity_id ->
+          assignments = Map.put(activity.assignments, member, assigned)
+          %{activity | assignments: assignments}
+
+        Enum.any?(activity.children, & &1.id == activity_id) ->
+          children = Enum.map(activity.children, fn child ->
+            if child.id == activity_id do
+              assignments = Map.put(child.assignments, member, assigned)
+              %{child | assignments: assignments}
+            else
+              child
+            end
+          end)
+          %{activity | children: children}
+
+        true ->
+          activity
+      end
+      Map.put(acc, key, updated)
+    end)
+  end
+
+  defp recalculate_activity(activity) do
+    final_days = activity.base_days * (1 - activity.auto_pct / 100)
+    %{activity | final_days: Float.round(final_days, 1)}
+  end
+
+  defp recalculate_child(child) do
+    final_days = child.base_days * (1 - child.auto_pct / 100)
+    %{child | final_days: Float.round(final_days, 1)}
+  end
+
+  defp recalculate_parent(activity) do
+    base_total = Enum.reduce(activity.children, 0, & &1.base_days + &2)
+    final_total = Enum.reduce(activity.children, 0, & &1.final_days + &2)
+    avg_auto = if base_total > 0, do: round((1 - final_total / base_total) * 100), else: 0
+
+    %{activity |
+      base_days: Float.round(base_total, 1),
+      final_days: Float.round(final_total, 1),
+      auto_pct: avg_auto
+    }
+  end
+
+  defp calculate_totals(activities) do
+    {base_sum, final_sum} = Enum.reduce(activities, {0, 0}, fn {_key, activity}, {base, final} ->
+      {base + activity.base_days, final + activity.final_days}
+    end)
+
+    avg_auto = if base_sum > 0, do: round((1 - final_sum / base_sum) * 100), else: 0
+
+    %{
+      base_days: Float.round(base_sum, 1),
+      final_days: Float.round(final_sum, 1),
+      avg_auto_pct: avg_auto
+    }
   end
 end

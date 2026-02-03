@@ -1,67 +1,53 @@
 defmodule NeoExcelPPT.Skills.Channel do
   @moduledoc """
-  Channel module for inter-skill communication.
+  Channel - The Global Event Bus.
 
-  Wraps Phoenix.PubSub to provide a simple interface for skills
-  to publish and subscribe to named channels.
-
-  Channels are the communication backbone between skills:
-  - Skills subscribe to input channels
-  - Skills publish to output channels
-  - Changes propagate automatically through the skill graph
-
-  ## Example
-
-      # Subscribe to a channel
-      Channel.subscribe(:total_files)
-
-      # Publish to a channel
-      Channel.publish(:total_files, 55000)
-
-      # The subscriber receives:
-      # {:channel_update, :total_files, 55000}
+  Wraps Phoenix.PubSub to provide:
+  - Skill-to-skill communication
+  - LiveView subscriptions for real-time updates
+  - All messages are also routed to HistoryTracker
   """
 
   @pubsub NeoExcelPPT.PubSub
 
-  @doc """
-  Subscribe the calling process to a channel.
-  The process will receive `{:channel_update, channel, value}` messages.
-  """
+  @doc "Subscribe to a channel"
   def subscribe(channel) when is_atom(channel) do
-    Phoenix.PubSub.subscribe(@pubsub, topic(channel))
+    Phoenix.PubSub.subscribe(@pubsub, to_string(channel))
   end
 
-  @doc """
-  Unsubscribe the calling process from a channel.
-  """
+  @doc "Unsubscribe from a channel"
   def unsubscribe(channel) when is_atom(channel) do
-    Phoenix.PubSub.unsubscribe(@pubsub, topic(channel))
+    Phoenix.PubSub.unsubscribe(@pubsub, to_string(channel))
   end
 
-  @doc """
-  Publish a value to a channel.
-  All subscribers will receive `{:channel_update, channel, value}`.
-  """
-  def publish(channel, value) when is_atom(channel) do
-    Phoenix.PubSub.broadcast(@pubsub, topic(channel), {:channel_update, channel, value})
+  @doc "Broadcast a message to a channel"
+  def broadcast(channel, message) when is_atom(channel) do
+    Phoenix.PubSub.broadcast(@pubsub, to_string(channel), {:channel_message, channel, message})
   end
 
-  @doc """
-  Publish a value to a channel, excluding the sender.
-  """
-  def publish_from(channel, value) when is_atom(channel) do
-    Phoenix.PubSub.broadcast_from(@pubsub, self(), topic(channel), {:channel_update, channel, value})
+  @doc "Broadcast from a specific skill"
+  def broadcast_from(skill_id, channel, data) do
+    message = %{
+      from: skill_id,
+      channel: channel,
+      data: data,
+      timestamp: DateTime.utc_now()
+    }
+    broadcast(channel, message)
   end
 
-  @doc """
-  Get all subscribers for a channel.
-  Useful for debugging and introspection.
-  """
-  def subscribers(channel) when is_atom(channel) do
-    # Note: This requires Registry tracking, simplified here
-    []
+  @doc "Subscribe to all channels in a list"
+  def subscribe_all(channels) when is_list(channels) do
+    Enum.each(channels, &subscribe/1)
   end
 
-  defp topic(channel), do: "skill_channel:#{channel}"
+  @doc "Subscribe to the global notification channel (receives all events)"
+  def subscribe_global do
+    subscribe(:_global_events)
+  end
+
+  @doc "Broadcast to global notification channel"
+  def broadcast_global(event) do
+    broadcast(:_global_events, event)
+  end
 end

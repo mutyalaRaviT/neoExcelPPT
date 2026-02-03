@@ -1,20 +1,16 @@
 defmodule NeoExcelPPTWeb do
   @moduledoc """
   The entrypoint for defining your web interface, such
-  as controllers, components, channels, and so on.
+  as controllers, views, channels and so on.
 
   This can be used in your application as:
 
       use NeoExcelPPTWeb, :controller
-      use NeoExcelPPTWeb, :html
+      use NeoExcelPPTWeb, :view
 
-  The definitions below will be executed for every controller,
-  component, etc, so keep them short and clean, focused
+  The definitions below will be executed for every view,
+  controller, etc, so keep them short and clean, focused
   on imports, uses and aliases.
-
-  Do NOT define functions inside the quoted expressions
-  below. Instead, define additional modules and import
-  those modules here.
   """
 
   def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
@@ -42,6 +38,7 @@ defmodule NeoExcelPPTWeb do
         layouts: [html: NeoExcelPPTWeb.Layouts]
 
       import Plug.Conn
+      import NeoExcelPPTWeb.Gettext
 
       unquote(verified_routes())
     end
@@ -78,7 +75,7 @@ defmodule NeoExcelPPTWeb do
   defp html_helpers do
     quote do
       import Phoenix.HTML
-      import Phoenix.HTML.Form
+      import NeoExcelPPTWeb.CoreComponents
 
       alias Phoenix.LiveView.JS
 

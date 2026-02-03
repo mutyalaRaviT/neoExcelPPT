@@ -69,3 +69,23 @@ npm-debug.log*
 
 # Ignore secrets
 config/prod.secret.exs
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/

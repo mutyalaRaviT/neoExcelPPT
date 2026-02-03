@@ -1,730 +1,768 @@
 defmodule NeoExcelPPTWeb.ProjectLive do
   @moduledoc """
-  Main project estimation LiveView.
+  Main Project Estimation LiveView.
 
-  Displays:
-  - Project Scope section
-  - Main Activities & Responsibilities table
-  - Component Scaling Calculator
-  - Project Details (Effort Breakdown, Buffers, Team Composition)
-
-  Subscribes to skill output channels for real-time updates.
+  Renders all skill components and handles real-time updates.
+  All elements have proper IDs for Puppeteer/Playwright testing.
   """
+
   use NeoExcelPPTWeb, :live_view
 
-  alias NeoExcelPPT.Skills.{Channel, Registry, EventStore}
-  alias NeoExcelPPTWeb.Components.{ProjectScope, ActivitiesTable, ComponentScaling, ProjectDetails}
-
-  import NeoExcelPPTWeb.CoreComponents
+  alias NeoExcelPPT.Skills.{Channel, SkillManager, HistoryTracker}
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      # Subscribe to skill output channels
-      Channel.subscribe(:project_scope_summary)
-      Channel.subscribe(:activities_summary)
-      Channel.subscribe(:scaling_summary)
-      Channel.subscribe(:effort_breakdown)
-      Channel.subscribe(:proposed_buffers)
-      Channel.subscribe(:team_composition)
-      Channel.subscribe(:event_store_updates)
-
-      # Initialize skills if not already running
-      unless Registry.skill_running?(:project_scope) do
-        Registry.init_project_skills()
-      end
+      # Subscribe to global events for live updates
+      Channel.subscribe(:_global_events)
+      Channel.subscribe(:total_files)
+      Channel.subscribe(:component_breakdown)
+      Channel.subscribe(:activity_totals)
+      Channel.subscribe(:total_days)
+      Channel.subscribe(:buffer_days)
     end
+
+    # Get initial state from skills
+    project_scope = get_skill_state(:project_scope)
+    activities = get_skill_state(:activity_calculator)
+    components = get_skill_state(:component_calculator)
+    effort = get_skill_state(:effort_aggregator)
+    buffers = get_skill_state(:buffer_calculator)
 
     socket =
       socket
       |> assign(:page_title, "Project Estimation")
-      |> assign(:project_scope, default_project_scope())
-      |> assign(:activities, default_activities())
-      |> assign(:scaling, default_scaling())
-      |> assign(:effort, default_effort())
-      |> assign(:buffers, default_buffers())
-      |> assign(:team, default_team())
+      |> assign(:project_scope, project_scope)
+      |> assign(:activities, activities)
+      |> assign(:components, components)
+      |> assign(:effort, effort)
+      |> assign(:buffers, buffers)
       |> assign(:show_team_assignments, true)
       |> assign(:show_detailed_hours, false)
       |> assign(:show_summary_columns, true)
-      |> assign(:recent_events, [])
 
     {:ok, socket}
   end
 
   @impl true
-  def handle_info({:channel_update, :project_scope_summary, value}, socket) do
-    {:noreply, assign(socket, :project_scope, value)}
-  end
+  def handle_info({:channel_message, channel, message}, socket) do
+    socket = case channel do
+      :total_files ->
+        assign(socket, :project_scope, Map.put(socket.assigns.project_scope, :total_files, message.data))
 
-  @impl true
-  def handle_info({:channel_update, :activities_summary, value}, socket) do
-    {:noreply, assign(socket, :activities, value)}
-  end
+      :component_breakdown ->
+        assign(socket, :project_scope, Map.put(socket.assigns.project_scope, :component_breakdown, message.data))
 
-  @impl true
-  def handle_info({:channel_update, :scaling_summary, value}, socket) do
-    {:noreply, assign(socket, :scaling, value)}
-  end
+      :activity_totals ->
+        assign(socket, :activities, Map.merge(socket.assigns.activities, message.data))
 
-  @impl true
-  def handle_info({:channel_update, :effort_breakdown, value}, socket) do
-    {:noreply, assign(socket, :effort, value)}
-  end
+      :total_days ->
+        assign(socket, :effort, Map.merge(socket.assigns.effort, message.data))
 
-  @impl true
-  def handle_info({:channel_update, :proposed_buffers, value}, socket) do
-    {:noreply, assign(socket, :buffers, value)}
-  end
+      :buffer_days ->
+        assign(socket, :buffers, Map.merge(socket.assigns.buffers, message.data))
 
-  @impl true
-  def handle_info({:channel_update, :team_composition, value}, socket) do
-    {:noreply, assign(socket, :team, value)}
-  end
+      :_global_events ->
+        # Force refresh on any event
+        socket
 
-  @impl true
-  def handle_info({:channel_update, :event_store_updates, {:new_event, event}}, socket) do
-    recent = [event | socket.assigns.recent_events] |> Enum.take(5)
-    {:noreply, assign(socket, :recent_events, recent)}
-  end
+      _ ->
+        socket
+    end
 
-  @impl true
-  def handle_info({:channel_update, _, _}, socket) do
     {:noreply, socket}
-  end
-
-  @impl true
-  def handle_event("toggle_team_assignments", _, socket) do
-    {:noreply, update(socket, :show_team_assignments, &(!&1))}
-  end
-
-  @impl true
-  def handle_event("toggle_detailed_hours", _, socket) do
-    {:noreply, update(socket, :show_detailed_hours, &(!&1))}
-  end
-
-  @impl true
-  def handle_event("toggle_summary_columns", _, socket) do
-    {:noreply, update(socket, :show_summary_columns, &(!&1))}
   end
 
   @impl true
   def handle_event("update_file_count", %{"type" => type, "value" => value}, socket) do
-    channel = String.to_atom("#{type}_files_count")
     {count, _} = Integer.parse(value)
-    Channel.publish(channel, count)
+    field = String.to_atom(type)
+
+    current = socket.assigns.project_scope
+    new_counts = %{
+      simple: if(field == :simple_files, do: count, else: current.simple_files),
+      medium: if(field == :medium_files, do: count, else: current.medium_files),
+      complex: if(field == :complex_files, do: count, else: current.complex_files)
+    }
+
+    SkillManager.send_input(:project_scope, :file_counts, new_counts)
+
     {:noreply, socket}
   end
 
   @impl true
-  def handle_event("update_activity", %{"id" => id, "field" => field, "value" => value}, socket) do
-    Channel.publish(:activity_updates, %{id: id, field: field, value: value})
+  def handle_event("toggle_assignment", %{"activity" => activity_id, "member" => member}, socket) do
+    activity_atom = String.to_atom(activity_id)
+    current_activities = socket.assigns.activities.activities
+
+    # Find current assignment state
+    current_assigned = get_assignment(current_activities, activity_atom, member)
+
+    SkillManager.send_input(:activity_calculator, :team_assignment, %{
+      activity_id: activity_atom,
+      member: member,
+      assigned: !current_assigned
+    })
+
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("update_activity", %{"activity" => activity_id, "field" => field, "value" => value}, socket) do
+    activity_atom = String.to_atom(activity_id)
+    field_atom = String.to_atom(field)
+
+    parsed_value = case field_atom do
+      :auto_pct -> parse_number(value)
+      :base_days -> parse_number(value)
+      :days_per_unit -> parse_number(value)
+      _ -> value
+    end
+
+    SkillManager.send_input(:activity_calculator, :activity_update, %{
+      id: activity_atom,
+      field: field_atom,
+      value: parsed_value
+    })
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("toggle_view", %{"view" => view}, socket) do
+    field = String.to_atom("show_#{view}")
+    current = Map.get(socket.assigns, field, false)
+    {:noreply, assign(socket, field, !current)}
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="space-y-6">
-      <!-- Project Scope Section -->
-      <.card>
-        <.card_header icon="⚙️" title="Project Scope" />
-        <div class="p-6">
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <!-- Left side: Basic info -->
-            <div class="space-y-6">
-              <div class="flex justify-between items-center">
-                <span class="text-gray-600">Total Files</span>
-                <span class="text-2xl font-mono font-bold text-blue-600">
-                  <%= format_number(@project_scope.total_files) %>
-                </span>
-              </div>
-              <div class="flex justify-between items-center">
-                <span class="text-gray-600">Project Type</span>
-                <span class="text-lg font-semibold text-green-600">
-                  <%= @project_scope.project_type %>
-                </span>
-              </div>
-              <div class="mt-6">
-                <h4 class="font-medium text-gray-900 mb-3">Project Steps:</h4>
-                <ul class="space-y-2 text-sm text-gray-600">
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    Data migration and DDL availability
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    Code extraction from ODI
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    Code conversion to IDMC
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    IDMC Mapping creation
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    IDMC Mapping Execution
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    Debugging and fixing issues
-                  </li>
-                  <li class="flex items-center gap-2">
-                    <span class="text-green-500">◉</span>
-                    SIT/PROD testing and maintenance
-                  </li>
-                </ul>
-              </div>
-            </div>
+    <div id="project-estimation" class="min-h-screen bg-gray-50 p-6">
+      <div class="max-w-7xl mx-auto space-y-6">
 
-            <!-- Right side: Component breakdown -->
-            <div>
-              <h4 class="font-medium text-gray-900 mb-4">Component Breakdown</h4>
-              <div class="space-y-3">
-                <%= for item <- @project_scope.breakdown do %>
-                  <div class={"p-4 rounded-lg border-l-4 #{complexity_border_color(item.type)}"}>
-                    <div class="flex justify-between items-start">
-                      <div>
-                        <p class="font-medium text-gray-900">
-                          <%= format_number(item.files) %> <%= complexity_label(item.type) %> files × <%= item.components_per %> components
-                        </p>
-                        <p class="text-sm text-gray-500"><%= item.label %></p>
-                      </div>
-                      <div class="text-right">
-                        <p class="text-lg font-mono font-bold"><%= format_k(item.total_components) %></p>
-                        <p class={"text-sm #{auto_color(item.auto_pct)}"}><%= item.auto_pct %>% auto</p>
-                      </div>
-                    </div>
-                  </div>
-                <% end %>
-              </div>
-              <div class="mt-4 p-3 bg-gray-50 rounded-lg flex items-center gap-2">
-                <span class="text-blue-500">ℹ️</span>
-                <span class="text-sm text-gray-600">
-                  <strong>Default Unit:</strong> 15 components = 1 day effort
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </.card>
+        <!-- Project Scope Section -->
+        <.project_scope_section scope={@project_scope} />
 
-      <!-- Main Activities & Responsibilities -->
-      <.card>
-        <.card_header icon="📋" title="Main Activities & Responsibilities">
-          <:actions>
-            <button class="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1">
-              <span>✏️</span> Edit
-            </button>
-          </:actions>
-        </.card_header>
-        <div class="p-4">
-          <!-- Toggle controls -->
-          <div class="flex gap-4 mb-4">
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={@show_team_assignments}
-                phx-click="toggle_team_assignments"
-                class="rounded border-gray-300 text-blue-600"
-              />
-              <span class="text-sm text-gray-700">Team Assignments</span>
-            </label>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={@show_detailed_hours}
-                phx-click="toggle_detailed_hours"
-                class="rounded border-gray-300 text-blue-600"
-              />
-              <span class="text-sm text-gray-700">Detailed Hours</span>
-            </label>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={@show_summary_columns}
-                phx-click="toggle_summary_columns"
-                class="rounded border-gray-300 text-blue-600"
-              />
-              <span class="text-sm text-gray-700">Summary Columns</span>
-            </label>
-          </div>
+        <!-- Main Activities Section -->
+        <.activities_section
+          activities={@activities}
+          show_team={@show_team_assignments}
+          show_hours={@show_detailed_hours}
+          show_summary={@show_summary_columns}
+        />
 
-          <!-- Activities Table -->
-          <div class="overflow-x-auto">
-            <table class="min-w-full">
-              <thead>
-                <tr class="border-b border-gray-200">
-                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Activity/Task</th>
-                  <%= if @show_team_assignments do %>
-                    <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase" colspan="3">Team Assignments</th>
-                  <% end %>
-                  <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase">Days/Unit</th>
-                  <%= if @show_summary_columns do %>
-                    <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase bg-amber-50" colspan="3">Summary</th>
-                  <% end %>
-                </tr>
-                <tr class="border-b border-gray-100">
-                  <th></th>
-                  <%= if @show_team_assignments do %>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400">SB</th>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400">CG</th>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400">S2P</th>
-                  <% end %>
-                  <th></th>
-                  <%= if @show_summary_columns do %>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400 bg-amber-50">Auto %</th>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400 bg-amber-50">Total Base</th>
-                    <th class="px-3 py-2 text-center text-xs text-gray-400 bg-amber-50">Total Final</th>
-                  <% end %>
-                </tr>
-              </thead>
-              <tbody>
-                <%= for category <- @activities.categories do %>
-                  <!-- Category Header Row -->
-                  <tr class={"#{category_bg_color(category.category)}"}>
-                    <td class="px-4 py-3">
-                      <span class="flex items-center gap-2 font-semibold text-gray-900">
-                        <span><%= category_icon(category.category) %></span>
-                        <%= category_name(category.category) %>
-                      </span>
-                    </td>
-                    <%= if @show_team_assignments do %>
-                      <td class="px-3 py-3 text-center">
-                        <.checkbox checked={false} />
-                      </td>
-                      <td class="px-3 py-3 text-center">
-                        <.checkbox checked={false} />
-                      </td>
-                      <td class="px-3 py-3 text-center">
-                        <.checkbox checked={true} />
-                      </td>
-                    <% end %>
-                    <td class="px-3 py-3 text-center text-sm text-gray-600">&lt; 0.1</td>
-                    <%= if @show_summary_columns do %>
-                      <td class="px-3 py-3 text-center bg-amber-50">
-                        <span class="text-green-600 font-medium"><%= category.auto_pct %>%</span>
-                      </td>
-                      <td class="px-3 py-3 text-center bg-amber-50">
-                        <span class="font-semibold"><%= Float.round(category.total_base, 1) %> days</span>
-                      </td>
-                      <td class="px-3 py-3 text-center bg-amber-50">
-                        <span class="text-green-600 font-medium"><%= Float.round(category.total_final, 1) %> days</span>
-                      </td>
-                    <% end %>
-                  </tr>
-                  <!-- Activity Rows -->
-                  <%= for activity <- category.activities, !activity.is_category do %>
-                    <tr class="border-b border-gray-100 hover:bg-gray-50">
-                      <td class="px-4 py-3 pl-8">
-                        <span class="text-gray-600 flex items-center gap-2">
-                          <span class="text-gray-300">├──</span>
-                          <%= activity.name %>
-                        </span>
-                      </td>
-                      <%= if @show_team_assignments do %>
-                        <td class="px-3 py-3 text-center">
-                          <.checkbox checked={activity.team.sb} />
-                        </td>
-                        <td class="px-3 py-3 text-center">
-                          <.checkbox checked={activity.team.cg} />
-                        </td>
-                        <td class="px-3 py-3 text-center">
-                          <.checkbox checked={activity.team.s2p} />
-                        </td>
-                      <% end %>
-                      <td class="px-3 py-3 text-center text-sm text-gray-600"><%= activity.days_unit %></td>
-                      <%= if @show_summary_columns do %>
-                        <td class="px-3 py-3 text-center bg-amber-50 text-sm"><%= activity.auto_pct %>%</td>
-                        <td class="px-3 py-3 text-center bg-amber-50 text-sm"><%= activity.base_days %> days</td>
-                        <td class="px-3 py-3 text-center bg-amber-50">
-                          <span class="text-green-600 text-sm"><%= Float.round(activity.base_days * (1 - activity.auto_pct / 100), 1) %> days</span>
-                        </td>
-                      <% end %>
-                    </tr>
-                  <% end %>
-                <% end %>
-                <!-- Totals Row -->
-                <tr class="bg-gray-100 font-semibold">
-                  <td class="px-4 py-3">
-                    <span class="flex items-center gap-2">
-                      <span>📊</span> TOTALS
-                    </span>
-                  </td>
-                  <%= if @show_team_assignments do %>
-                    <td class="px-3 py-3 text-center"><.checkbox checked={false} /></td>
-                    <td class="px-3 py-3 text-center"><.checkbox checked={false} /></td>
-                    <td class="px-3 py-3 text-center"><.checkbox checked={false} /></td>
-                  <% end %>
-                  <td class="px-3 py-3 text-center text-sm">&lt; 0.1</td>
-                  <%= if @show_summary_columns do %>
-                    <td class="px-3 py-3 text-center bg-amber-50">
-                      <span class="text-green-600"><%= @activities.totals.auto_pct %>%</span>
-                    </td>
-                    <td class="px-3 py-3 text-center bg-amber-50">
-                      <span><%= Float.round(@activities.totals.base_days, 1) %> days</span>
-                    </td>
-                    <td class="px-3 py-3 text-center bg-amber-50">
-                      <span class="text-green-600"><%= Float.round(@activities.totals.final_days, 1) %> days</span>
-                    </td>
-                  <% end %>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </.card>
+        <!-- Component Scaling Calculator -->
+        <.component_calculator_section components={@components} />
 
-      <!-- Component Scaling Calculator -->
-      <.card>
-        <.card_header icon="📐" title="Component Scaling Calculator" />
-        <div class="p-4">
-          <div class="overflow-x-auto">
-            <table class="min-w-full">
-              <thead>
-                <tr class="bg-blue-50">
-                  <th class="px-4 py-3 text-left text-xs font-medium text-blue-700 uppercase">Component Type</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Count</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Avg Units</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Total Units</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Time/Unit</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Base Days</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Auto %</th>
-                  <th class="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase">Final Days</th>
-                </tr>
-              </thead>
-              <tbody>
-                <%= for row <- @scaling.rows do %>
-                  <tr class="border-b border-gray-100 hover:bg-gray-50">
-                    <td class={"px-4 py-3 font-medium #{scaling_type_color(row.type)}"}>
-                      <%= row.type %>
-                    </td>
-                    <td class="px-4 py-3 text-center">
-                      <input
-                        type="number"
-                        value={row.count}
-                        class="w-20 text-center border-gray-200 rounded text-sm"
-                      />
-                    </td>
-                    <td class="px-4 py-3 text-center">
-                      <input
-                        type="number"
-                        value={row.avg_units}
-                        class="w-16 text-center border-gray-200 rounded text-sm"
-                      />
-                    </td>
-                    <td class="px-4 py-3 text-center font-mono"><%= format_k(row.total_units) %></td>
-                    <td class="px-4 py-3 text-center">
-                      <input
-                        type="number"
-                        value={row.time_per_unit}
-                        step="0.01"
-                        class="w-16 text-center border-gray-200 rounded text-sm"
-                      />
-                    </td>
-                    <td class="px-4 py-3 text-center font-mono"><%= format_number(trunc(row.base_days)) %> days</td>
-                    <td class="px-4 py-3 text-center">
-                      <input
-                        type="number"
-                        value={row.auto_pct}
-                        class="w-16 text-center border-gray-200 rounded text-sm"
-                      />
-                    </td>
-                    <td class="px-4 py-3 text-center font-mono"><%= format_number(trunc(row.final_days)) %> days</td>
-                  </tr>
-                <% end %>
-                <tr class="bg-gray-800 text-white font-semibold">
-                  <td class="px-4 py-3">TOTAL SCALED EFFORT:</td>
-                  <td class="px-4 py-3 text-center">—</td>
-                  <td class="px-4 py-3 text-center"><%= Float.round(@scaling.totals.total_units / length(@scaling.rows), 1) %></td>
-                  <td class="px-4 py-3 text-center font-mono"><%= format_k(@scaling.totals.total_units) %></td>
-                  <td class="px-4 py-3 text-center">—</td>
-                  <td class="px-4 py-3 text-center font-mono"><%= format_number(trunc(@scaling.totals.total_base_days)) %> days</td>
-                  <td class="px-4 py-3 text-center"><%= @scaling.totals.avg_auto_pct %>%</td>
-                  <td class="px-4 py-3 text-center font-mono"><%= format_number(trunc(@scaling.totals.total_final_days)) %>h</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </.card>
+        <!-- Project Details Grid -->
+        <.project_details_section effort={@effort} buffers={@buffers} />
 
-      <!-- Project Details -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <!-- Effort Breakdown -->
-        <.card>
-          <.card_header icon="📊" title="Effort Breakdown" />
-          <div class="p-6 space-y-4">
-            <div>
-              <p class="text-sm text-gray-500">Base Manual Days:</p>
-              <p class="text-3xl font-mono font-bold text-orange-500">
-                <%= Float.round(@effort.base_manual_days, 1) %> <span class="text-lg">days</span>
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-gray-500">Base Automation Days:</p>
-              <p class="text-3xl font-mono font-bold text-orange-500">
-                <%= Float.round(@effort.base_automation_days, 1) %> <span class="text-lg">days</span>
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-gray-500">Total Base Days:</p>
-              <p class="text-3xl font-mono font-bold text-orange-500">
-                <%= format_number(trunc(@effort.total_base_days)) %><span class="text-lg">h</span>
-              </p>
-            </div>
-          </div>
-        </.card>
+      </div>
+    </div>
+    """
+  end
 
-        <!-- Proposed Buffers -->
-        <.card>
-          <.card_header icon="⏱️" title="Proposed Buffers" />
-          <div class="p-6">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-gray-500">
-                  <th class="text-left pb-2">Buffer Type</th>
-                  <th class="text-center pb-2">%</th>
-                  <th class="text-right pb-2">Hours</th>
-                </tr>
-              </thead>
-              <tbody>
-                <%= for buffer <- @buffers.buffers do %>
-                  <tr class="border-t border-gray-100">
-                    <td class="py-2">
-                      <p class="font-medium"><%= buffer.type %></p>
-                      <p class="text-xs text-gray-400"><%= buffer.description %></p>
-                    </td>
-                    <td class="py-2 text-center"><%= buffer.percentage %>%</td>
-                    <td class="py-2 text-right font-mono"><%= buffer.days %> days</td>
-                  </tr>
-                <% end %>
-              </tbody>
-            </table>
-          </div>
-        </.card>
-
-        <!-- Team Composition -->
-        <.card>
-          <.card_header icon="👥" title="Team Composition" />
-          <div class="p-6 space-y-4">
-            <div class="flex justify-between items-center">
-              <span class="text-gray-600">Automation Team:</span>
-              <span class="text-4xl font-bold text-blue-600"><%= @team.automation_team %></span>
-            </div>
-            <div class="flex justify-between items-center">
-              <span class="text-gray-600">Testing Team:</span>
-              <span class="text-4xl font-bold text-orange-500"><%= @team.testing_team %></span>
-            </div>
-            <div class="border-t pt-4">
-              <div class="flex justify-between items-center">
-                <span class="text-gray-600">Total Resources:</span>
-                <span class="text-2xl font-bold text-gray-900"><%= @team.total_resources %></span>
-              </div>
-            </div>
-          </div>
-        </.card>
+  # Component: Project Scope Section
+  defp project_scope_section(assigns) do
+    ~H"""
+    <div id="project-scope" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div class="flex items-center gap-2 mb-6">
+        <span class="text-xl">⚙️</span>
+        <h2 class="text-lg font-semibold text-gray-900">Project Scope</h2>
       </div>
 
-      <!-- Recent Events (if any) -->
-      <%= if @recent_events != [] do %>
-        <.card>
-          <.card_header icon="🔔" title="Recent Changes" />
-          <div class="p-4">
-            <div class="space-y-2">
-              <%= for event <- @recent_events do %>
-                <div class="flex items-center gap-3 text-sm p-2 bg-blue-50 rounded">
-                  <span class="text-blue-500">●</span>
-                  <span class="font-medium"><%= event.skill %></span>
-                  <span class="text-gray-400">→</span>
-                  <span><%= event.channel %></span>
-                  <span class="text-gray-400">changed to</span>
-                  <span class="font-mono"><%= inspect(event.new_value) %></span>
+      <div class="grid grid-cols-2 gap-8">
+        <!-- Left Column: Basic Info -->
+        <div class="space-y-4">
+          <div class="flex justify-between items-center">
+            <span class="text-gray-600">Total Files</span>
+            <span id="project-scope-total-files" class="text-2xl font-bold text-blue-600 font-mono">
+              <%= format_number(@scope.total_files) %>
+            </span>
+          </div>
+
+          <div class="flex justify-between items-center">
+            <span class="text-gray-600">Project Type</span>
+            <span id="project-scope-project-type" class="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+              <%= @scope.project_type %>
+            </span>
+          </div>
+
+          <div class="mt-6">
+            <h3 class="text-sm font-medium text-gray-700 mb-2">Project Steps:</h3>
+            <ul class="space-y-1 text-sm text-gray-600">
+              <li class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full border-2 border-green-500"></span>
+                Data migration and DDL availability
+              </li>
+              <li class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full border-2 border-green-500"></span>
+                Code extraction from ODI
+              </li>
+              <li class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full border-2 border-green-500"></span>
+                Code conversion to IDMC
+              </li>
+              <li class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full border-2 border-green-500"></span>
+                IDMC Mapping creation
+              </li>
+              <li class="flex items-center gap-2">
+                <span class="w-4 h-4 rounded-full border-2 border-green-500"></span>
+                Debugging and fixing issues
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Right Column: Component Breakdown -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-700 mb-4">Component Breakdown</h3>
+          <div class="space-y-3">
+            <!-- Simple Files -->
+            <div id="component-simple" class="flex items-center justify-between p-3 bg-blue-50 rounded-lg border-l-4 border-blue-500">
+              <div>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="project-scope-simple-count"
+                    type="number"
+                    value={@scope.simple_files}
+                    phx-blur="update_file_count"
+                    phx-value-type="simple_files"
+                    class="w-24 px-2 py-1 border rounded text-sm font-mono"
+                  />
+                  <span class="text-sm text-gray-600">simple files × 15 components</span>
                 </div>
-              <% end %>
+                <p class="text-xs text-gray-500 mt-1">Basic transformations</p>
+              </div>
+              <div class="text-right">
+                <span id="component-simple-total" class="text-lg font-bold text-gray-900 font-mono">
+                  <%= format_number(@scope.component_breakdown.simple) %>
+                </span>
+                <p class="text-xs text-green-600">(90% auto)</p>
+              </div>
+            </div>
+
+            <!-- Medium Files -->
+            <div id="component-medium" class="flex items-center justify-between p-3 bg-yellow-50 rounded-lg border-l-4 border-yellow-500">
+              <div>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="project-scope-medium-count"
+                    type="number"
+                    value={@scope.medium_files}
+                    phx-blur="update_file_count"
+                    phx-value-type="medium_files"
+                    class="w-24 px-2 py-1 border rounded text-sm font-mono"
+                  />
+                  <span class="text-sm text-gray-600">medium files × 150 components</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Moderate complexity</p>
+              </div>
+              <div class="text-right">
+                <span id="component-medium-total" class="text-lg font-bold text-gray-900 font-mono">
+                  <%= format_number(@scope.component_breakdown.medium) %>
+                </span>
+                <p class="text-xs text-yellow-600">(75% auto)</p>
+              </div>
+            </div>
+
+            <!-- Complex Files -->
+            <div id="component-complex" class="flex items-center justify-between p-3 bg-orange-50 rounded-lg border-l-4 border-orange-500">
+              <div>
+                <div class="flex items-center gap-2">
+                  <input
+                    id="project-scope-complex-count"
+                    type="number"
+                    value={@scope.complex_files}
+                    phx-blur="update_file_count"
+                    phx-value-type="complex_files"
+                    class="w-24 px-2 py-1 border rounded text-sm font-mono"
+                  />
+                  <span class="text-sm text-gray-600">complex files × 300 components</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Advanced processing</p>
+              </div>
+              <div class="text-right">
+                <span id="component-complex-total" class="text-lg font-bold text-gray-900 font-mono">
+                  <%= format_number(@scope.component_breakdown.complex) %>
+                </span>
+                <p class="text-xs text-orange-600">(65% auto)</p>
+              </div>
+            </div>
+
+            <!-- Info -->
+            <div class="flex items-center gap-2 text-sm text-gray-500 mt-4 p-2 bg-gray-50 rounded">
+              <span>ℹ️</span>
+              <span><strong>Default Unit:</strong> 15 components = 1 day effort</span>
             </div>
           </div>
-        </.card>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # Component: Activities Section
+  defp activities_section(assigns) do
+    ~H"""
+    <div id="activities-table" class="bg-white rounded-xl shadow-sm border border-gray-200">
+      <div class="flex items-center justify-between p-4 border-b border-gray-100">
+        <div class="flex items-center gap-2">
+          <span class="text-xl">📋</span>
+          <h2 class="text-lg font-semibold text-gray-900">Main Activities & Responsibilities</h2>
+        </div>
+        <div class="flex items-center gap-4">
+          <!-- Toggle buttons -->
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={@show_team}
+              phx-click="toggle_view"
+              phx-value-view="team_assignments"
+              class="rounded border-gray-300"
+            />
+            <span class="text-sm text-gray-600">Team Assignments</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={@show_hours}
+              phx-click="toggle_view"
+              phx-value-view="detailed_hours"
+              class="rounded border-gray-300"
+            />
+            <span class="text-sm text-gray-600">Detailed Hours</span>
+          </label>
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={@show_summary}
+              phx-click="toggle_view"
+              phx-value-view="summary_columns"
+              class="rounded border-gray-300"
+            />
+            <span class="text-sm text-gray-600">Summary Columns</span>
+          </label>
+          <button class="text-gray-500 hover:text-gray-700">
+            ✏️ Edit
+          </button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Activity/Task</th>
+              <%= if @show_team do %>
+                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase" colspan="3">Team Assignments</th>
+              <% end %>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Days/Unit</th>
+              <%= if @show_summary do %>
+                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Auto %</th>
+                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Total Base</th>
+                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Total Final</th>
+              <% end %>
+            </tr>
+            <%= if @show_team do %>
+              <tr class="bg-gray-50 border-b">
+                <th></th>
+                <th class="px-2 py-1 text-center text-xs text-gray-400">SB</th>
+                <th class="px-2 py-1 text-center text-xs text-gray-400">CG</th>
+                <th class="px-2 py-1 text-center text-xs text-gray-400">S2P</th>
+                <th></th>
+                <%= if @show_summary do %>
+                  <th></th>
+                  <th></th>
+                  <th></th>
+                <% end %>
+              </tr>
+            <% end %>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <%= for {_key, activity} <- @activities.activities do %>
+              <.activity_row
+                activity={activity}
+                is_parent={true}
+                show_team={@show_team}
+                show_summary={@show_summary}
+              />
+              <%= for child <- activity.children do %>
+                <.activity_row
+                  activity={child}
+                  is_parent={false}
+                  show_team={@show_team}
+                  show_summary={@show_summary}
+                />
+              <% end %>
+            <% end %>
+
+            <!-- Totals Row -->
+            <tr id="activities-totals" class="bg-gray-100 font-semibold">
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span>📊</span>
+                  <span>TOTALS</span>
+                </div>
+              </td>
+              <%= if @show_team do %>
+                <td></td><td></td><td></td>
+              <% end %>
+              <td class="px-4 py-3 text-center text-gray-500">< 0.1</td>
+              <%= if @show_summary do %>
+                <td id="activities-total-auto-pct" class="px-4 py-3 text-center text-green-600">
+                  <%= @activities.totals.avg_auto_pct %>%
+                </td>
+                <td id="activities-total-base-days" class="px-4 py-3 text-center font-bold">
+                  <%= @activities.totals.base_days %> days
+                </td>
+                <td id="activities-total-final-days" class="px-4 py-3 text-center text-green-600 font-bold">
+                  <%= @activities.totals.final_days %> days
+                </td>
+              <% end %>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    """
+  end
+
+  # Component: Single Activity Row
+  defp activity_row(assigns) do
+    color_classes = case assigns.activity[:color] do
+      "yellow" -> "bg-yellow-50"
+      "blue" -> "bg-blue-50"
+      "purple" -> "bg-purple-50"
+      "green" -> "bg-green-50"
+      _ -> ""
+    end
+
+    assigns = assign(assigns, :color_classes, color_classes)
+
+    ~H"""
+    <tr id={"activity-row-#{@activity.id}"} class={if @is_parent, do: @color_classes, else: ""}>
+      <td class="px-4 py-3">
+        <div class={"flex items-center gap-2 #{if !@is_parent, do: "pl-6"}"}>
+          <%= if @is_parent do %>
+            <span><%= @activity.icon %></span>
+            <span class="font-semibold text-gray-900"><%= @activity.name %></span>
+          <% else %>
+            <span class="text-gray-400">├──</span>
+            <span class="text-gray-700"><%= @activity.name %></span>
+          <% end %>
+        </div>
+      </td>
+
+      <%= if @show_team do %>
+        <%= for member <- ["SB", "CG", "S2P"] do %>
+          <td class="px-2 py-3 text-center">
+            <button
+              id={"activity-#{@activity.id}-assignment-#{member}"}
+              phx-click="toggle_assignment"
+              phx-value-activity={@activity.id}
+              phx-value-member={member}
+              class={"w-5 h-5 rounded border-2 flex items-center justify-center #{if @activity.assignments[member], do: "bg-blue-500 border-blue-500 text-white", else: "border-gray-300"}"}
+            >
+              <%= if @activity.assignments[member] do %>
+                <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                </svg>
+              <% end %>
+            </button>
+          </td>
+        <% end %>
       <% end %>
+
+      <td id={"activity-#{@activity.id}-days"} class="px-4 py-3 text-center text-gray-600">
+        <%= @activity.days_per_unit %>
+      </td>
+
+      <%= if @show_summary do %>
+        <td id={"activity-#{@activity.id}-auto-pct"} class="px-4 py-3 text-center text-green-600">
+          <%= @activity.auto_pct %>%
+        </td>
+        <td id={"activity-#{@activity.id}-total-base"} class="px-4 py-3 text-center">
+          <%= @activity.base_days %> days
+        </td>
+        <td id={"activity-#{@activity.id}-total-final"} class="px-4 py-3 text-center text-green-600">
+          <%= @activity.final_days %> days
+        </td>
+      <% end %>
+    </tr>
+    """
+  end
+
+  # Component: Component Calculator Section
+  defp component_calculator_section(assigns) do
+    ~H"""
+    <div id="component-calculator" class="bg-white rounded-xl shadow-sm border border-gray-200">
+      <div class="flex items-center gap-2 p-4 border-b border-gray-100">
+        <span class="text-xl">📐</span>
+        <h2 class="text-lg font-semibold text-gray-900">Component Scaling Calculator</h2>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Component Type</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Count</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Avg Units</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Total Units</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Time/Unit</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Base Days</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Auto %</th>
+              <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Final Days</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <%= for {type, config} <- @components.components do %>
+              <tr id={"component-calc-row-#{type}"}>
+                <td class="px-4 py-3">
+                  <span class={"font-medium #{type_color(type)}"}><%= String.capitalize(to_string(type)) %> files</span>
+                </td>
+                <td id={"component-#{type}-count"} class="px-4 py-3 text-center">
+                  <input
+                    type="number"
+                    value={config.count}
+                    class="w-20 px-2 py-1 border rounded text-center font-mono"
+                    readonly
+                  />
+                </td>
+                <td id={"component-#{type}-avg-units"} class="px-4 py-3 text-center">
+                  <input
+                    type="number"
+                    value={config.avg_units}
+                    class="w-16 px-2 py-1 border rounded text-center font-mono"
+                    readonly
+                  />
+                </td>
+                <td id={"component-#{type}-total-units"} class="px-4 py-3 text-center font-mono">
+                  <%= format_number(@components.scaled_effort[type].total_units) %>
+                </td>
+                <td id={"component-#{type}-time-unit"} class="px-4 py-3 text-center font-mono">
+                  <%= config.time_per_unit %>
+                </td>
+                <td id={"component-#{type}-base-days"} class="px-4 py-3 text-center font-mono">
+                  <%= format_number(@components.scaled_effort[type].base_days) %> days
+                </td>
+                <td id={"component-#{type}-auto-pct"} class="px-4 py-3 text-center">
+                  <input
+                    type="number"
+                    value={config.auto_pct}
+                    class="w-14 px-2 py-1 border rounded text-center font-mono"
+                    readonly
+                  />
+                </td>
+                <td id={"component-#{type}-final-days"} class="px-4 py-3 text-center font-mono text-green-600 font-bold">
+                  <%= format_number(@components.scaled_effort[type].final_days) %> days
+                </td>
+              </tr>
+            <% end %>
+
+            <!-- Totals -->
+            <tr id="component-calc-totals" class="bg-gray-100 font-semibold">
+              <td class="px-4 py-3">TOTAL SCALED EFFORT:</td>
+              <td class="px-4 py-3 text-center">—</td>
+              <td id="component-totals-avg-units" class="px-4 py-3 text-center font-mono">
+                <%= Float.round(@components.totals.total_units / 55220, 2) %>
+              </td>
+              <td id="component-totals-total-units" class="px-4 py-3 text-center font-mono">
+                <%= format_number(@components.totals.total_units) %>
+              </td>
+              <td class="px-4 py-3 text-center">—</td>
+              <td id="component-totals-base-days" class="px-4 py-3 text-center font-mono">
+                <%= format_number(@components.totals.base_days) %> days
+              </td>
+              <td id="component-totals-auto-pct" class="px-4 py-3 text-center">
+                <%= @components.totals.avg_auto_pct %>%
+              </td>
+              <td id="component-totals-final-days" class="px-4 py-3 text-center text-green-600">
+                <%= format_number(@components.totals.final_days) %>h
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    """
+  end
+
+  # Component: Project Details Section
+  defp project_details_section(assigns) do
+    ~H"""
+    <div id="project-details" class="grid grid-cols-3 gap-6">
+      <!-- Effort Breakdown -->
+      <div id="effort-breakdown" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center gap-2 mb-6">
+          <span class="text-xl">📊</span>
+          <h2 class="text-lg font-semibold text-gray-900">Effort Breakdown</h2>
+        </div>
+
+        <div class="space-y-4">
+          <div>
+            <p class="text-sm text-gray-500">Base Manual Days:</p>
+            <p id="effort-manual-days" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.manual_days %> days
+            </p>
+          </div>
+          <div>
+            <p class="text-sm text-gray-500">Base Automation Days:</p>
+            <p id="effort-automation-days" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.automation_days %> days
+            </p>
+          </div>
+          <div>
+            <p class="text-sm text-gray-500">Total Base Days:</p>
+            <p id="effort-total-days" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.total_base_days %>h
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Proposed Buffers -->
+      <div id="proposed-buffers" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center gap-2 mb-6">
+          <span class="text-xl">⏱️</span>
+          <h2 class="text-lg font-semibold text-gray-900">Proposed Buffers</h2>
+        </div>
+
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-gray-500 text-left">
+              <th class="pb-2">Buffer Type</th>
+              <th class="pb-2 text-center">%</th>
+              <th class="pb-2 text-right">Hours</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr id="buffer-leave">
+              <td class="py-2">
+                <p class="font-medium">Leave Buffer</p>
+                <p class="text-xs text-gray-400"><%= @buffers.buffers.leave.description %></p>
+              </td>
+              <td class="py-2 text-center"><%= @buffers.buffers.leave.percentage %>%</td>
+              <td id="buffer-leave-days" class="py-2 text-right font-mono"><%= @buffers.buffers.leave.days %> days</td>
+            </tr>
+            <tr id="buffer-dependency">
+              <td class="py-2">
+                <p class="font-medium">Dependency Buffer</p>
+                <p class="text-xs text-gray-400"><%= @buffers.buffers.dependency.description %></p>
+              </td>
+              <td class="py-2 text-center"><%= @buffers.buffers.dependency.percentage %>%</td>
+              <td id="buffer-dependency-days" class="py-2 text-right font-mono"><%= @buffers.buffers.dependency.days %> days</td>
+            </tr>
+            <tr id="buffer-learning">
+              <td class="py-2">
+                <p class="font-medium">Learning Curve Buffer</p>
+                <p class="text-xs text-gray-400"><%= @buffers.buffers.learning.description %></p>
+              </td>
+              <td class="py-2 text-center"><%= @buffers.buffers.learning.percentage %>%</td>
+              <td id="buffer-learning-days" class="py-2 text-right font-mono"><%= @buffers.buffers.learning.days %> days</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Team Composition -->
+      <div id="team-composition" class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div class="flex items-center gap-2 mb-6">
+          <span class="text-xl">👥</span>
+          <h2 class="text-lg font-semibold text-gray-900">Team Composition</h2>
+        </div>
+
+        <div class="space-y-4">
+          <div class="flex justify-between items-center">
+            <span class="text-gray-600">Automation Team:</span>
+            <span id="team-automation-count" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.team.automation %>
+            </span>
+          </div>
+          <div class="flex justify-between items-center">
+            <span class="text-gray-600">Testing Team:</span>
+            <span id="team-testing-count" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.team.testing %>
+            </span>
+          </div>
+          <div class="flex justify-between items-center border-t pt-4">
+            <span class="text-gray-600 font-semibold">Total Resources:</span>
+            <span id="team-total-count" class="text-3xl font-bold text-orange-500 font-mono">
+              <%= @effort.team.total %>
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
     """
   end
 
   # Helper functions
-
-  defp format_number(num) when is_integer(num) do
-    num
-    |> Integer.to_string()
-    |> String.graphemes()
-    |> Enum.reverse()
-    |> Enum.chunk_every(3)
-    |> Enum.join(",")
-    |> String.reverse()
+  defp get_skill_state(skill_id) do
+    case skill_id do
+      :project_scope -> NeoExcelPPT.Skills.ProjectScopeSkill.get_state()
+      :activity_calculator -> NeoExcelPPT.Skills.ActivityCalculatorSkill.get_state()
+      :component_calculator -> NeoExcelPPT.Skills.ComponentCalculatorSkill.get_state()
+      :effort_aggregator -> NeoExcelPPT.Skills.EffortAggregatorSkill.get_state()
+      :buffer_calculator -> NeoExcelPPT.Skills.BufferCalculatorSkill.get_state()
+    end
+  rescue
+    _ -> default_state_for(skill_id)
   end
 
-  defp format_number(num), do: format_number(trunc(num))
-
-  defp format_k(num) when num >= 1000 do
-    "#{Float.round(num / 1000, 1)}k"
-  end
-
-  defp format_k(num), do: "#{num}"
-
-  defp complexity_border_color(:simple), do: "border-green-400 bg-green-50"
-  defp complexity_border_color(:medium), do: "border-yellow-400 bg-yellow-50"
-  defp complexity_border_color(:complex), do: "border-orange-400 bg-orange-50"
-
-  defp complexity_label(:simple), do: "simple"
-  defp complexity_label(:medium), do: "medium"
-  defp complexity_label(:complex), do: "complex"
-
-  defp auto_color(pct) when pct >= 80, do: "text-green-600"
-  defp auto_color(pct) when pct >= 60, do: "text-yellow-600"
-  defp auto_color(_), do: "text-orange-600"
-
-  defp category_bg_color(:preprocessing), do: "bg-yellow-50"
-  defp category_bg_color(:code_conversion), do: "bg-blue-50"
-  defp category_bg_color(:execution_with_data), do: "bg-purple-50"
-  defp category_bg_color(:post_processing), do: "bg-green-50"
-  defp category_bg_color(_), do: "bg-gray-50"
-
-  defp category_icon(:preprocessing), do: "📁"
-  defp category_icon(:code_conversion), do: "💻"
-  defp category_icon(:execution_with_data), do: "⚡"
-  defp category_icon(:post_processing), do: "🚀"
-  defp category_icon(_), do: "📋"
-
-  defp category_name(:preprocessing), do: "PREPROCESSING"
-  defp category_name(:code_conversion), do: "CODE CONVERSION"
-  defp category_name(:execution_with_data), do: "EXECUTION WITH DATA"
-  defp category_name(:post_processing), do: "POST PROCESSING"
-  defp category_name(cat), do: cat |> to_string() |> String.upcase()
-
-  defp scaling_type_color("Simple files"), do: "text-green-600"
-  defp scaling_type_color("Medium files"), do: "text-yellow-600"
-  defp scaling_type_color("Complex files"), do: "text-orange-600"
-  defp scaling_type_color(_), do: "text-gray-600"
-
-  # Default data functions
-
-  defp default_project_scope do
+  defp default_state_for(:project_scope) do
     %{
-      total_files: 55_220,
+      total_files: 55220,
       project_type: "ODI → IDMC",
-      breakdown: [
-        %{type: :simple, files: 55_000, components_per: 15, total_components: 825_000, auto_pct: 90, label: "Basic transformations"},
-        %{type: :medium, files: 110, components_per: 150, total_components: 16_500, auto_pct: 75, label: "Moderate complexity"},
-        %{type: :complex, files: 110, components_per: 300, total_components: 33_000, auto_pct: 65, label: "Advanced processing"}
-      ]
+      simple_files: 55000,
+      medium_files: 110,
+      complex_files: 110,
+      component_breakdown: %{simple: 825_000, medium: 16_500, complex: 33_000, total: 874_500}
     }
   end
 
-  defp default_activities do
-    %{
-      categories: [
-        %{
-          category: :preprocessing,
-          auto_pct: 90,
-          total_base: 15.0,
-          total_final: 1.5,
-          activities: [
-            %{id: "prep", name: "PREPROCESSING", is_category: true, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.1, auto_pct: 90, base_days: 15},
-            %{id: "ddls", name: "DDLs Ready", is_category: false, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.3, auto_pct: 95, base_days: 3},
-            %{id: "data", name: "Data Ready", is_category: false, team: %{sb: true, cg: false, s2p: false}, days_unit: 0.6, auto_pct: 80, base_days: 6},
-            %{id: "flow", name: "Mapping Flow ID", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 85, base_days: 6}
-          ]
-        },
-        %{
-          category: :code_conversion,
-          auto_pct: 85,
-          total_base: 30.0,
-          total_final: 4.5,
-          activities: [
-            %{id: "cc", name: "CODE CONVERSION", is_category: true, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.1, auto_pct: 85, base_days: 30},
-            %{id: "mc", name: "Mapping Creation", is_category: false, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.1, auto_pct: 90, base_days: 15},
-            %{id: "ce", name: "Code Execution", is_category: false, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.1, auto_pct: 70, base_days: 15},
-            %{id: "cv", name: "Compile Validation", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 60, base_days: 6}
-          ]
-        },
-        %{
-          category: :execution_with_data,
-          auto_pct: 65,
-          total_base: 22.5,
-          total_final: 7.9,
-          activities: [
-            %{id: "ed", name: "EXECUTION WITH DATA", is_category: true, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 65, base_days: 22.5},
-            %{id: "dv", name: "Data Verification", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 70, base_days: 7.5},
-            %{id: "ex", name: "Execute", is_category: false, team: %{sb: true, cg: false, s2p: false}, days_unit: 0.1, auto_pct: 95, base_days: 3.8},
-            %{id: "vl", name: "Validation & Logs", is_category: false, team: %{sb: false, cg: false, s2p: true}, days_unit: 0.1, auto_pct: 50, base_days: 7.5},
-            %{id: "dd", name: "Debug Data Issues", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 40, base_days: 3.8},
-            %{id: "dc", name: "Debug Code Issues", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 30, base_days: 3}
-          ]
-        },
-        %{
-          category: :post_processing,
-          auto_pct: 75,
-          total_base: 15.0,
-          total_final: 3.8,
-          activities: [
-            %{id: "pp", name: "POST PROCESSING", is_category: true, team: %{sb: true, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 75, base_days: 15},
-            %{id: "ds", name: "Dev to SIT Movement", is_category: false, team: %{sb: true, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 80, base_days: 6},
-            %{id: "it", name: "Integration Testing", is_category: false, team: %{sb: false, cg: true, s2p: false}, days_unit: 0.1, auto_pct: 70, base_days: 6},
-            %{id: "dm", name: "Deployment & Maintenance", is_category: false, team: %{sb: true, cg: false, s2p: false}, days_unit: 0.1, auto_pct: 60, base_days: 3}
-          ]
-        }
-      ],
-      totals: %{
-        auto_pct: 76,
-        base_days: 82.5,
-        final_days: 19.8
-      }
-    }
+  defp default_state_for(:activity_calculator) do
+    NeoExcelPPT.Skills.ActivityCalculatorSkill.initial_state()
   end
 
-  defp default_scaling do
-    %{
-      rows: [
-        %{type: "Simple files", count: 55_000, avg_units: 15, total_units: 825_000, time_per_unit: 0.16, base_days: 132_000, auto_pct: 90, final_days: 13_200},
-        %{type: "Medium files", count: 110, avg_units: 150, total_units: 16_500, time_per_unit: 2.16, base_days: 35_877, auto_pct: 75, final_days: 8_969},
-        %{type: "Complex files", count: 110, avg_units: 300, total_units: 33_000, time_per_unit: 4.32, base_days: 142_560, auto_pct: 65, final_days: 49_896}
-      ],
-      totals: %{
-        total_units: 874_500,
-        total_base_days: 310_437,
-        avg_auto_pct: 76.8,
-        total_final_days: 503
-      }
-    }
+  defp default_state_for(:component_calculator) do
+    NeoExcelPPT.Skills.ComponentCalculatorSkill.initial_state()
   end
 
-  defp default_effort do
-    %{
-      base_manual_days: 62.8,
-      base_automation_days: 193.7,
-      total_base_days: 660
-    }
+  defp default_state_for(:effort_aggregator) do
+    NeoExcelPPT.Skills.EffortAggregatorSkill.initial_state()
   end
 
-  defp default_buffers do
-    %{
-      buffers: [
-        %{type: "Leave Buffer", percentage: 15, days: 9.4, description: "Sick leaves, personal time, holidays, unplanned absenteeism"},
-        %{type: "Dependency Buffer", percentage: 10, days: 6.3, description: "Delays from external teams or systems"},
-        %{type: "Learning Curve Buffer", percentage: 15, days: 9.4, description: "Onboarding and skill development time"}
-      ],
-      total_buffer_days: 25.1,
-      total_buffer_pct: 40
-    }
+  defp default_state_for(:buffer_calculator) do
+    NeoExcelPPT.Skills.BufferCalculatorSkill.initial_state()
   end
 
-  defp default_team do
-    %{
-      automation_team: 6,
-      testing_team: 6,
-      total_resources: 12
-    }
+  defp get_assignment(activities, activity_id, member) do
+    Enum.find_value(activities, false, fn {_key, activity} ->
+      cond do
+        activity.id == activity_id -> activity.assignments[member]
+        child = Enum.find(activity.children, & &1.id == activity_id) -> child.assignments[member]
+        true -> nil
+      end
+    end)
   end
+
+  defp format_number(n) when is_integer(n), do: Number.Delimit.number_to_delimited(n, precision: 0)
+  defp format_number(n) when is_float(n), do: Number.Delimit.number_to_delimited(n, precision: 1)
+  defp format_number(n), do: to_string(n)
+
+  defp parse_number(str) do
+    case Float.parse(str) do
+      {n, _} -> n
+      :error -> 0
+    end
+  end
+
+  defp type_color(:simple), do: "text-blue-600"
+  defp type_color(:medium), do: "text-yellow-600"
+  defp type_color(:complex), do: "text-orange-600"
+  defp type_color(_), do: "text-gray-600"
 end
