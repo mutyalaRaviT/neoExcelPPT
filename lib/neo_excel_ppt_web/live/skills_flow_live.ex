@@ -5,7 +5,7 @@ defmodule NeoExcelPPTWeb.SkillsFlowLive do
   """
   use NeoExcelPPTWeb, :live_view
 
-  alias NeoExcelPPT.Skills.{DSL, SkillManager}
+  alias NeoExcelPPT.Skills.DSL
 
   @impl true
   def mount(_params, _session, socket) do
@@ -436,7 +436,7 @@ defmodule NeoExcelPPTWeb.SkillsFlowLive do
   end
 
   # Helper for LiveSvelte
-  defp live_svelte(socket, component, props, opts) do
+  defp live_svelte(_socket, component, props, opts) do
     id = Keyword.get(opts, :id, component)
 
     assigns = %{

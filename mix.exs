@@ -29,7 +29,8 @@ defmodule NeoExcelPPT.MixProject do
       {:phoenix_html, "~> 4.0"},
       {:phoenix_live_reload, "~> 1.4", only: :dev},
       {:phoenix_live_view, "~> 0.20.1"},
-      {:live_svelte, "~> 0.12.0"},
+      # LiveSvelte for Svelte component integration (optional - app works without it)
+      {:live_svelte, "~> 0.12.0", optional: true},
       {:floki, ">= 0.30.0", only: :test},
       {:phoenix_live_dashboard, "~> 0.8.2"},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},

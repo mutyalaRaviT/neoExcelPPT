@@ -13,6 +13,11 @@ config :neo_excel_ppt, NeoExcelPPTWeb.Endpoint,
   pubsub_server: NeoExcelPPT.PubSub,
   live_view: [signing_salt: "skills_actors_salt"]
 
+# LiveSvelte configuration
+config :live_svelte,
+  # Disable SSR for simpler setup (can enable later with Node.js)
+  ssr: false
+
 config :esbuild,
   version: "0.17.11",
   default: [

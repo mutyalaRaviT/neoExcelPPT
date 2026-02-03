@@ -1,20 +1,13 @@
 // NeoExcelPPT JavaScript
-// Phoenix LiveView and core functionality with LiveSvelte
+// Phoenix LiveView and core functionality
 
 import "phoenix_html"
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "../vendor/topbar"
-import { getHooks } from "live_svelte"
-
-// Import Svelte components
-import * as Components from "../svelte/index.js"
 
 // LiveView Hooks for custom JS functionality
-// Merge LiveSvelte hooks with custom hooks
-let Hooks = {
-  ...getHooks(Components)
-}
+let Hooks = {}
 
 // Number Input Hook - handles number formatting
 Hooks.NumberInput = {
@@ -57,6 +50,43 @@ Hooks.Copy = {
         this.pushEvent("copied", {})
       })
     })
+  }
+}
+
+// LiveSvelte Hook - renders Svelte components or shows placeholder
+// To enable full Svelte support: cd assets && npm install && npm run build
+Hooks.LiveSvelte = {
+  mounted() {
+    const component = this.el.dataset.component
+    const props = JSON.parse(this.el.dataset.props || "{}")
+
+    // Show placeholder with component info
+    this.el.innerHTML = `
+      <div class="flex flex-col h-full bg-gradient-to-br from-slate-50 to-slate-100 border border-slate-200 rounded-lg overflow-hidden">
+        <div class="bg-slate-800 text-white px-4 py-2 flex items-center justify-between">
+          <span class="font-semibold">${component}</span>
+          <span class="text-xs bg-slate-600 px-2 py-1 rounded">Svelte Component</span>
+        </div>
+        <div class="flex-1 p-4 overflow-auto">
+          <div class="mb-4">
+            <p class="text-slate-600 text-sm">
+              To enable interactive Svelte components, run:
+            </p>
+            <code class="block mt-2 bg-slate-800 text-green-400 p-3 rounded text-xs font-mono">
+              cd assets && npm install && npm run build
+            </code>
+          </div>
+          <div class="border-t border-slate-200 pt-4">
+            <p class="text-xs text-slate-500 mb-2">Component Props:</p>
+            <pre class="text-xs bg-white p-3 rounded border border-slate-200 overflow-auto max-h-48">${JSON.stringify(props, null, 2)}</pre>
+          </div>
+        </div>
+      </div>
+    `
+  },
+  updated() {
+    // Re-render on update
+    this.mounted()
   }
 }
 
