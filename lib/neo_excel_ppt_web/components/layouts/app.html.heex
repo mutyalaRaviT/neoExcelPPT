@@ -1,0 +1,28 @@
+<header class="bg-white shadow-sm border-b border-gray-200">
+  <div class="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <h1 class="text-xl font-semibold text-gray-900">
+          NeoExcelPPT
+        </h1>
+        <span class="text-sm text-gray-500">Skills-Actors Project Estimation</span>
+      </div>
+      <nav class="flex gap-4">
+        <.link navigate={~p"/"} class="text-sm font-medium text-gray-700 hover:text-blue-600">
+          Dashboard
+        </.link>
+        <.link navigate={~p"/skills"} class="text-sm font-medium text-gray-700 hover:text-blue-600">
+          Skills
+        </.link>
+        <.link navigate={~p"/timeline"} class="text-sm font-medium text-gray-700 hover:text-blue-600">
+          Timeline
+        </.link>
+      </nav>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+  <.flash_group flash={@flash} />
+  <%= @inner_content %>
+</main>
