@@ -36,6 +36,13 @@ class TestElementIDs:
         assert IDs.NAV_PROJECT == "nav-project"
         assert IDs.NAV_TIMELINE == "nav-timeline"
         assert IDs.NAV_SKILLS == "nav-skills"
+        assert IDs.NAV_FLOW == "nav-flow"
+
+    def test_flow_editor_ids_defined(self):
+        """Test that flow editor IDs are defined."""
+        assert IDs.FLOW_EDITOR == "skills-flow-page"
+        assert IDs.FLOW_SKILL_EDITOR == "skill-flow-editor"
+        assert IDs.FLOW_DSL_EDITOR == "dsl-editor"
 
     def test_project_scope_ids_defined(self):
         """Test that project scope IDs are defined."""
@@ -172,7 +179,8 @@ class TestIDUniqueness:
         """Test that all static IDs are unique."""
         all_ids = [
             IDs.NAV_MAIN, IDs.NAV_PROJECT, IDs.NAV_TIMELINE, IDs.NAV_SKILLS,
-            IDs.APP_STATUS,
+            IDs.NAV_FLOW, IDs.APP_STATUS,
+            IDs.FLOW_EDITOR, IDs.FLOW_SKILL_EDITOR, IDs.FLOW_DSL_EDITOR,
             IDs.PROJECT_SCOPE, IDs.PROJECT_SCOPE_TOTAL_FILES,
             IDs.PROJECT_SCOPE_PROJECT_TYPE, IDs.PROJECT_SCOPE_SIMPLE_COUNT,
             IDs.PROJECT_SCOPE_MEDIUM_COUNT, IDs.PROJECT_SCOPE_COMPLEX_COUNT,

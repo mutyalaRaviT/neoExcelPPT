@@ -94,7 +94,13 @@ class ElementIDs:
     NAV_PROJECT = "nav-project"
     NAV_TIMELINE = "nav-timeline"
     NAV_SKILLS = "nav-skills"
+    NAV_FLOW = "nav-flow"
     APP_STATUS = "app-status"
+
+    # Flow Editor
+    FLOW_EDITOR = "skills-flow-page"
+    FLOW_SKILL_EDITOR = "skill-flow-editor"
+    FLOW_DSL_EDITOR = "dsl-editor"
 
     # Project Scope Section
     PROJECT_SCOPE = "project-scope"

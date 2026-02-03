@@ -1,13 +1,20 @@
 // NeoExcelPPT JavaScript
-// Phoenix LiveView and core functionality
+// Phoenix LiveView and core functionality with LiveSvelte
 
 import "phoenix_html"
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "../vendor/topbar"
+import { getHooks } from "live_svelte"
+
+// Import Svelte components
+import * as Components from "../svelte/index.js"
 
 // LiveView Hooks for custom JS functionality
-let Hooks = {}
+// Merge LiveSvelte hooks with custom hooks
+let Hooks = {
+  ...getHooks(Components)
+}
 
 // Number Input Hook - handles number formatting
 Hooks.NumberInput = {
