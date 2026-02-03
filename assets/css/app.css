@@ -1,0 +1,74 @@
+@import "tailwindcss/base";
+@import "tailwindcss/components";
+@import "tailwindcss/utilities";
+
+/* Custom styles for NeoExcelPPT */
+
+/* Skill components */
+.skill-input {
+  @apply transition-all duration-200;
+}
+
+.skill-input:focus {
+  @apply ring-2 ring-blue-500 ring-opacity-50;
+}
+
+/* Timeline animations */
+.timeline-event {
+  @apply transition-all duration-200;
+}
+
+.timeline-event.applied {
+  @apply bg-green-50 border-l-4 border-green-500;
+}
+
+/* Activity row styles */
+.activity-row {
+  @apply transition-colors duration-150;
+}
+
+.activity-row:hover {
+  @apply bg-gray-50;
+}
+
+/* Checkbox animations */
+.skill-checkbox {
+  @apply transition-all duration-150;
+}
+
+.skill-checkbox:hover {
+  @apply scale-110;
+}
+
+/* Loading states */
+.phx-click-loading {
+  @apply opacity-50 pointer-events-none;
+}
+
+.phx-submit-loading {
+  @apply opacity-50 pointer-events-none;
+}
+
+/* Phoenix LiveView flash messages */
+.phx-no-feedback.invalid-feedback,
+.phx-no-feedback .invalid-feedback {
+  display: none;
+}
+
+/* Number formatting */
+.font-mono {
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smooth scrolling for timeline */
+.timeline-scroll {
+  scroll-behavior: smooth;
+}
+
+/* Responsive table */
+@media (max-width: 768px) {
+  .responsive-table {
+    @apply block overflow-x-auto;
+  }
+}
