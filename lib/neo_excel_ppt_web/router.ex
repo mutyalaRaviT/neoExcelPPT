@@ -20,6 +20,7 @@ defmodule NeoExcelPPTWeb.Router do
     live "/", ProjectLive, :index
     live "/timeline", TimelineLive, :index
     live "/skills", SkillsLive, :index
+    live "/flow", SkillsFlowLive, :index
   end
 
   # API routes for testing
