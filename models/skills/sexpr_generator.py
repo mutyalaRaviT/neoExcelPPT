@@ -1,8 +1,9 @@
 """
-S-Expression Parser and Generator for NeoExcelPPT Skills.
+S-Expression Parser, Generator, and Evaluator for NeoExcelPPT Skills.
 
 This module provides:
-- SExprParser: Tokenize, parse, and validate S-expression strings
+- SExprParser: Tokenize, parse, and validate S-expression strings (with map support)
+- SExprEvaluator: Actually evaluate S-expressions against a state/env
 - SExprGenerator: Generate S-expression skill definitions from structured data
 - WiringGenerator: Compose skill wiring as S-expressions
 - ActionComposer: Build nested UX action S-expressions
@@ -16,12 +17,24 @@ from typing import Any
 
 
 # =============================================================================
-# S-Expression Parser
+# S-Expression Parser (with curly-brace map support)
 # =============================================================================
 
 
 class SExprParser:
-    """Parse S-expression strings into Python AST (nested lists/atoms)."""
+    """Parse S-expression strings into Python AST (nested lists/atoms).
+
+    Supports:
+    - Parenthesized lists: (+ 1 2)
+    - Curly-brace maps: {:key value :key2 value2} -> Python dict
+    - Square-bracket vectors: [a b c] -> Python list tagged as vector
+    - Keywords: :keyword
+    - Strings: "hello"
+    - Numbers: 42, 3.14
+    - Booleans: true, false
+    - Nil: nil
+    - Comments: ;; ignored
+    """
 
     def tokenize(self, source: str) -> list[str]:
         """Tokenize an S-expression string into a flat list of tokens."""
@@ -32,10 +45,11 @@ class SExprParser:
             return f"__STR_{len(strings) - 1}__"
 
         cleaned = re.sub(r'"[^"]*"', replace_string, source)
-        # Remove comments (lines starting with ;;)
+        # Remove comments (;; to end of line)
         cleaned = re.sub(r';;[^\n]*', '', cleaned)
-        # Pad parens with spaces
-        cleaned = cleaned.replace('(', ' ( ').replace(')', ' ) ')
+        # Pad all delimiters with spaces
+        for ch in '(){}[]':
+            cleaned = cleaned.replace(ch, f' {ch} ')
         tokens = cleaned.split()
         # Restore string literals
         restored = []
@@ -73,8 +87,12 @@ class SExprParser:
         token = tokens[0]
         if token == '(':
             return self._parse_list(tokens[1:])
-        elif token == ')':
-            raise ValueError("Unexpected closing parenthesis")
+        elif token == '{':
+            return self._parse_map(tokens[1:])
+        elif token == '[':
+            return self._parse_vector(tokens[1:])
+        elif token in (')', '}', ']'):
+            raise ValueError(f"Unexpected closing delimiter: {token}")
         else:
             return self._parse_atom(tokens[0]), tokens[1:]
 
@@ -86,6 +104,42 @@ class SExprParser:
         if not tokens:
             raise ValueError("Unclosed parenthesis")
         return result, tokens[1:]  # skip the ')'
+
+    def _parse_map(self, tokens: list[str]) -> tuple[dict, list[str]]:
+        """Parse {key value key value ...} into a Python dict."""
+        result: dict[str, Any] = {}
+        items: list[Any] = []
+        while tokens and tokens[0] != '}':
+            expr, tokens = self._parse_expr(tokens)
+            items.append(expr)
+        if not tokens:
+            raise ValueError("Unclosed curly brace")
+        # Pair up items: key1 val1 key2 val2 ...
+        for i in range(0, len(items) - 1, 2):
+            key = items[i]
+            val = items[i + 1]
+            # Strip leading colon from keyword keys for Python dict
+            if isinstance(key, str) and key.startswith(':'):
+                key = key[1:]
+            result[key] = val
+        # Handle odd number of items (last key with no value)
+        if len(items) % 2 == 1:
+            last = items[-1]
+            if isinstance(last, str) and last.startswith(':'):
+                result[last[1:]] = None
+            else:
+                result[str(last)] = None
+        return result, tokens[1:]  # skip the '}'
+
+    def _parse_vector(self, tokens: list[str]) -> tuple[list, list[str]]:
+        """Parse [a b c] into a Python list."""
+        result: list[Any] = []
+        while tokens and tokens[0] != ']':
+            expr, tokens = self._parse_expr(tokens)
+            result.append(expr)
+        if not tokens:
+            raise ValueError("Unclosed square bracket")
+        return result, tokens[1:]  # skip the ']'
 
     def _parse_atom(self, token: str) -> Any:
         # Keywords (:keyword)
@@ -131,10 +185,263 @@ class SExprParser:
                 elif item[0] == "outputs":
                     skill["outputs"] = item[1:]
                 elif item[0] == "state" and len(item) > 1:
-                    skill["state"] = item[1]
+                    # state arg is now a parsed dict (from {}) or a list
+                    raw = item[1]
+                    if isinstance(raw, dict):
+                        skill["state"] = raw
+                    elif isinstance(raw, list):
+                        # fallback: treat as flat key-value pairs
+                        skill["state"] = raw
+                    else:
+                        skill["state"] = raw
                 elif item[0] == "compute":
                     skill["compute"] = item[1:]
         return skill
+
+
+# =============================================================================
+# S-Expression Evaluator
+# =============================================================================
+
+
+class SExprEvaluator:
+    """Evaluate S-expressions against a state and input environment.
+
+    Supports:
+    - Arithmetic: (+ a b), (- a b), (* a b), (/ a b)
+    - Comparison: (> a b), (< a b), (>= a b), (<= a b), (= a b)
+    - Logic: (and a b), (or a b), (not a)
+    - State: (get state :key), (get input :channel), (set :key val)
+    - Emission: (emit :channel value)
+    - Control: (let [bindings] body), (if cond then else), (do expr...)
+    - Collections: (sum list), (count list), (map fn list), (merge a b)
+    - String: (str a b c)
+
+    Usage:
+        evaluator = SExprEvaluator()
+        result = evaluator.evaluate(
+            "(+ (get input :a) (get input :b))",
+            state={"total": 0},
+            inputs={"a": 10, "b": 20}
+        )
+        # result.value == 30
+    """
+
+    @dataclass
+    class Result:
+        value: Any = None
+        state: dict[str, Any] = field(default_factory=dict)
+        emissions: dict[str, Any] = field(default_factory=dict)
+        error: str | None = None
+
+    def __init__(self):
+        self.parser = SExprParser()
+
+    def evaluate(
+        self,
+        source: str | list,
+        state: dict[str, Any] | None = None,
+        inputs: dict[str, Any] | None = None,
+    ) -> "SExprEvaluator.Result":
+        """Evaluate an S-expression string or AST.
+
+        Args:
+            source: S-expression string or pre-parsed AST
+            state: Skill state dict
+            inputs: Input channel values
+
+        Returns:
+            Result with value, updated state, emissions, and any error.
+        """
+        env = {
+            "state": dict(state or {}),
+            "input": dict(inputs or {}),
+            "_emissions": {},
+        }
+
+        try:
+            if isinstance(source, str):
+                parsed = self.parser.parse(source)
+                if not parsed["valid"]:
+                    return self.Result(error=parsed["error"])
+                ast = parsed["ast"]
+            else:
+                ast = source
+
+            value = self._eval(ast, env)
+            return self.Result(
+                value=value,
+                state=env["state"],
+                emissions=env["_emissions"],
+            )
+        except Exception as e:
+            return self.Result(
+                error=str(e),
+                state=env.get("state", {}),
+                emissions=env.get("_emissions", {}),
+            )
+
+    def _eval(self, ast: Any, env: dict) -> Any:
+        # Atoms
+        if ast is None or isinstance(ast, (bool, int, float)):
+            return ast
+        if isinstance(ast, str):
+            if ast.startswith(':'):
+                return ast  # keyword literal
+            # Symbol lookup in local env
+            if ast in env:
+                return env[ast]
+            return ast  # unresolved symbol
+        if isinstance(ast, dict):
+            return {k: self._eval(v, env) for k, v in ast.items()}
+
+        # Must be a list (S-expression)
+        if not isinstance(ast, list) or not ast:
+            return ast
+
+        op = ast[0]
+
+        # Arithmetic
+        if op == '+':
+            vals = [self._eval(a, env) for a in ast[1:]]
+            return sum(v for v in vals if isinstance(v, (int, float)))
+        if op == '-':
+            if len(ast) == 2:
+                return -self._eval(ast[1], env)
+            a, b = self._eval(ast[1], env), self._eval(ast[2], env)
+            return a - b
+        if op == '*':
+            a, b = self._eval(ast[1], env), self._eval(ast[2], env)
+            return a * b
+        if op == '/':
+            a, b = self._eval(ast[1], env), self._eval(ast[2], env)
+            if b == 0:
+                return 0
+            return a / b
+
+        # Comparison
+        if op == '>':
+            return self._eval(ast[1], env) > self._eval(ast[2], env)
+        if op == '<':
+            return self._eval(ast[1], env) < self._eval(ast[2], env)
+        if op == '>=':
+            return self._eval(ast[1], env) >= self._eval(ast[2], env)
+        if op == '<=':
+            return self._eval(ast[1], env) <= self._eval(ast[2], env)
+        if op == '=':
+            return self._eval(ast[1], env) == self._eval(ast[2], env)
+
+        # Logic
+        if op == 'and':
+            return all(self._eval(a, env) for a in ast[1:])
+        if op == 'or':
+            return any(self._eval(a, env) for a in ast[1:])
+        if op == 'not':
+            return not self._eval(ast[1], env)
+
+        # State access
+        if op == 'get':
+            target = self._eval(ast[1], env)
+            key = ast[2] if len(ast) > 2 else None
+            if isinstance(target, str) and target == 'state':
+                target = env["state"]
+            elif isinstance(target, str) and target == 'input':
+                target = env["input"]
+            if isinstance(target, dict) and key is not None:
+                clean_key = key[1:] if isinstance(key, str) and key.startswith(':') else key
+                return target.get(clean_key, target.get(key))
+            return target
+
+        # State mutation
+        if op == 'set':
+            key = ast[1]
+            val = self._eval(ast[2], env)
+            clean_key = key[1:] if isinstance(key, str) and key.startswith(':') else key
+            env["state"][clean_key] = val
+            return val
+
+        # Emission
+        if op == 'emit':
+            channel = ast[1]
+            val = self._eval(ast[2], env)
+            clean_ch = channel[1:] if isinstance(channel, str) and channel.startswith(':') else channel
+            env["_emissions"][clean_ch] = val
+            return val
+
+        # Let bindings
+        if op == 'let':
+            bindings = ast[1]  # [name1 expr1 name2 expr2 ...]
+            local_env = dict(env)
+            if isinstance(bindings, list):
+                for i in range(0, len(bindings) - 1, 2):
+                    name = bindings[i]
+                    val = self._eval(bindings[i + 1], local_env)
+                    local_env[name] = val
+            # Evaluate body expressions
+            result = None
+            for body_expr in ast[2:]:
+                result = self._eval(body_expr, local_env)
+            # Propagate state/emissions back
+            env["state"] = local_env["state"]
+            env["_emissions"] = local_env["_emissions"]
+            return result
+
+        # If
+        if op == 'if':
+            cond = self._eval(ast[1], env)
+            if cond:
+                return self._eval(ast[2], env)
+            elif len(ast) > 3:
+                return self._eval(ast[3], env)
+            return None
+
+        # Do (sequence)
+        if op in ('do', 'seq'):
+            result = None
+            for expr in ast[1:]:
+                result = self._eval(expr, env)
+            return result
+
+        # Collections
+        if op == 'sum':
+            lst = self._eval(ast[1], env)
+            if isinstance(lst, (list, tuple)):
+                return sum(v for v in lst if isinstance(v, (int, float)))
+            if isinstance(lst, dict):
+                return sum(v for v in lst.values() if isinstance(v, (int, float)))
+            return 0
+        if op == 'count':
+            lst = self._eval(ast[1], env)
+            return len(lst) if hasattr(lst, '__len__') else 0
+        if op == 'merge':
+            a = self._eval(ast[1], env)
+            b = self._eval(ast[2], env)
+            if isinstance(a, dict) and isinstance(b, dict):
+                return {**a, **b}
+            return b
+        if op == 'assoc':
+            m = self._eval(ast[1], env)
+            key = ast[2]
+            val = self._eval(ast[3], env)
+            clean_key = key[1:] if isinstance(key, str) and key.startswith(':') else key
+            if isinstance(m, dict):
+                return {**m, clean_key: val}
+            return {clean_key: val}
+
+        # String concat
+        if op == 'str':
+            parts = [str(self._eval(a, env)) for a in ast[1:]]
+            return "".join(parts)
+
+        # Sum values of a map
+        if op == 'sum-values':
+            m = self._eval(ast[1], env)
+            if isinstance(m, dict):
+                return sum(v for v in m.values() if isinstance(v, (int, float)))
+            return 0
+
+        # Unknown function - return list as-is
+        return [self._eval(a, env) for a in ast]
 
 
 # =============================================================================
